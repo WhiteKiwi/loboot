@@ -1,0 +1,87 @@
+name: Release readiness (no publication)
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/release-readiness.yml'
+      - '.github/workflows/release.yml'
+      - 'scripts/**'
+      - 'Cargo.*'
+      - 'rust-toolchain.toml'
+      - 'src/**'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Optional version tag to validate (vX.Y.Z); creates no tag or release
+        type: string
+        default: ''
+  workflow_call:
+    inputs:
+      tag:
+        type: string
+        default: ''
+permissions:
+  contents: read
+jobs:
+  package:
+    name: Package / ${{ matrix.target }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - os: macos-15
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - run: rustup toolchain install 1.99.0 --profile minimal
+      - run: rustc -vV
+      - run: cargo test --locked --all-targets
+      - run: cargo build --locked --release
+      - name: Archive and verify without invoking a native service manager
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION_TAG: ${{ inputs.tag }}
+        run: |
+          args=()
+          if [ -n "$VERSION_TAG" ]; then args+=(--tag "$VERSION_TAG"); fi
+          python3 scripts/release.py build --target "$TARGET" --output "dist/$TARGET" "${args[@]}"
+          python3 scripts/release.py check --target "$TARGET" --input "dist/$TARGET" "${args[@]}"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: loboot-dist-${{ matrix.target }}
+          path: dist/${{ matrix.target }}/
+          if-no-files-found: error
+          retention-days: 14
+  inventory:
+    name: Exact archive inventory and checksums
+    needs: package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: loboot-dist-*
+          path: artifacts
+      - run: |
+          version="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')"
+          python3 scripts/release.py collect --artifacts artifacts --out release-artifacts --version "$version"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: loboot-release-bundle
+          path: release-artifacts/
+          if-no-files-found: error
+          retention-days: 14

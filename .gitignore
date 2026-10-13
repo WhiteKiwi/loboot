@@ -1,2 +1,7 @@
 /target
 *.tmp
+__pycache__/
+*.pyc
+/dist/
+/artifacts/
+/release-artifacts/

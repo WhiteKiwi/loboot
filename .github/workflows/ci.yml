@@ -1,20 +1,57 @@
-name: Rust
+name: CI
 on:
   push:
+    branches: [main]
   pull_request:
+  workflow_dispatch:
 permissions:
   contents: read
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 jobs:
-  verify:
-    strategy:
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
+  quality:
+    name: Format, lint, and release-script tests / Rust 1.99.0
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          components: rustfmt, clippy
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - run: rustup toolchain install 1.99.0 --profile minimal --component rustfmt --component clippy
+      - run: rustc -vV
       - run: cargo fmt --all -- --check
       - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: python3 -m unittest discover -s scripts -p 'test_*.py' -v
+      - run: python3 scripts/check_docs.py
+  test:
+    name: Tests / ${{ matrix.os }} / Rust ${{ matrix.rust }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            rust: '1.99.0'
+          - os: ubuntu-24.04
+            rust: stable
+          - os: macos-15
+            rust: stable
+    runs-on: ${{ matrix.os }}
+    env:
+      RUSTUP_TOOLCHAIN: ${{ matrix.rust }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+      - run: rustc -vV
       - run: cargo test --locked --all-targets
+      - run: cargo build --locked --release
+      - name: Safe binary smoke test
+        run: |
+          target/release/loboot --version
+          target/release/loboot --help
