@@ -1002,9 +1002,9 @@ fn launchd_signal_number(value: &str) -> Option<u32> {
     let number = if let Some((name, number)) = value.split_once(": ") {
         if name.is_empty()
             || name.trim() != name
-            || !name.bytes().all(|byte| {
-                byte.is_ascii_alphanumeric() || matches!(byte, b' ' | b'/' | b'-')
-            })
+            || !name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b" /-()".contains(&byte))
         {
             return None;
         }
@@ -1736,12 +1736,26 @@ mod tests {
         // Primary project observations of launchctl's native spellings:
         // https://github.com/akitaonrails/ai-memory/blob/main/docs/macos.md
         // https://github.com/Homebrew/brew/issues/14924
+        // https://github.com/openclaw/openclaw/issues/56122
+        // Signal descriptions: apple-oss-distributions/Libc gen/FreeBSD/siglist.c.
         for (key, value, state, exit_hint, signal_hint) in [
             ("last exit code", "(never exited)", "running", false, false),
             ("last exit code", "0", "not running", false, false),
             ("last exit code", "23", "not running", true, false),
-            ("last exit code", "78: EX_CONFIG", "not running", true, false),
-            ("last exit code", "75: EX_TEMPFAIL", "not running", true, false),
+            (
+                "last exit code",
+                "78: EX_CONFIG",
+                "not running",
+                true,
+                false,
+            ),
+            (
+                "last exit code",
+                "75: EX_TEMPFAIL",
+                "not running",
+                true,
+                false,
+            ),
             ("last terminating signal", "15", "not running", false, true),
             (
                 "last terminating signal",
