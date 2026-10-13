@@ -111,8 +111,12 @@ impl TeardownObserver for ProcessObserver {
 // launchd's removal acknowledgement. There is never a bootstrap retry.
 const TEARDOWN_OBSERVATIONS: usize = 100;
 
-fn observed_launchd_pid(status: &Status) -> Result<Option<u32>> {
-    if status.running.is_none() {
+fn observed_launchd_pid(status: &Status, after_bootout: bool) -> Result<Option<u32>> {
+    // Hosted launchd reports this exact transitional spelling while handling
+    // SIGTERM. It is not proof of a running or stopped process. Only an already
+    // accepted bootout may keep observing it, with a valid PID below.
+    let terminating = after_bootout && status.loaded == Some(true) && status.state == "SIGTERMed";
+    if status.running.is_none() && !terminating {
         return Err(Error::new(
             "status_required",
             "launchd process state is unknown",
@@ -410,7 +414,7 @@ impl Platform {
     /// Validate teardown observations before accepting a destructive bootout.
     pub fn validate_bootout_observation(&self, status: &Status) -> Result<()> {
         if *self == Self::Macos {
-            observed_launchd_pid(status)?;
+            observed_launchd_pid(status, false)?;
         }
         Ok(())
     }
@@ -434,14 +438,14 @@ impl Platform {
             ));
         }
         let mut pids = BTreeSet::new();
-        if let Some(pid) = observed_launchd_pid(before)? {
+        if let Some(pid) = observed_launchd_pid(before, false)? {
             pids.insert(pid);
         }
         let mut settled = false;
         for attempt in 0..TEARDOWN_OBSERVATIONS {
             let status = self.status(id, session, runner)?;
             self.verify_managed_status(id, definition, &status)?;
-            if let Some(pid) = observed_launchd_pid(&status)? {
+            if let Some(pid) = observed_launchd_pid(&status, true)? {
                 pids.insert(pid);
             }
             let mut process_alive = false;
@@ -1277,6 +1281,38 @@ mod tests {
         assert_eq!(status.running, Some(false));
         assert_eq!(status.raw["last exit code"], "0");
     }
+    #[test]
+    fn launchd_sigtermed_preserves_unknown_running_state() {
+        let mut runner = FakeRunner {
+            outputs: VecDeque::from([
+                output(
+                    true,
+                    0,
+                    "gui/501/com.loboot.example = {\nstate = SIGTERMed\npid = 42\n}\n",
+                    "",
+                ),
+                output(
+                    true,
+                    0,
+                    "disabled services = {\n\"com.loboot.example\" => enabled\n}\n",
+                    "",
+                ),
+            ]),
+            ..Default::default()
+        };
+        let status = Platform::Macos
+            .status_with_context("example", 501, &mut runner)
+            .unwrap();
+        assert_eq!(status.loaded, Some(true));
+        assert_eq!(status.running, None);
+        assert_eq!(status.state, "SIGTERMed");
+        assert_eq!(observed_launchd_pid(&status, true).unwrap(), Some(42));
+        assert_eq!(
+            observed_launchd_pid(&status, false).unwrap_err().code,
+            "status_required"
+        );
+    }
+
     #[test]
     fn malformed_success_is_not_trusted() {
         for platform in [Platform::Linux, Platform::Macos] {

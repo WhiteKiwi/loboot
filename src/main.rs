@@ -819,6 +819,39 @@ mod tests {
         assert!(runner.outputs.is_empty());
     }
     #[test]
+    fn mac_teardown_waits_through_sigtermed_without_calling_it_stopped() {
+        let (_temp, ctx, definition) = native_context();
+        let mut runner = restart_runner(&definition);
+        // Even after its PID exits, a still-loaded SIGTERMed job cannot settle.
+        for _ in 0..2 {
+            runner.outputs.extend(launchd_observation(
+                &definition,
+                "SIGTERMed",
+                Some("42"),
+                true,
+            ));
+        }
+        for _ in 0..2 {
+            runner
+                .outputs
+                .extend(launchd_observation(&definition, "absent", None, true));
+        }
+        runner.outputs.push_back(native_output(true, "", ""));
+        runner
+            .outputs
+            .extend(launchd_observation(&definition, "not running", None, true));
+        let mut observer = FakeObserver {
+            alive: [true, false, false, false].into(),
+            ..Default::default()
+        };
+        apply_native_action(&ctx, Action::Restart, "example", &mut runner, &mut observer).unwrap();
+        assert_eq!(observer.pids, [42, 42, 42, 42]);
+        assert_eq!(observer.pauses, 3);
+        assert_eq!(mutations(&runner), ["bootout", "bootstrap"]);
+        assert!(runner.outputs.is_empty());
+    }
+
+    #[test]
     fn mac_teardown_tracks_new_pid_and_resets_settled_observations() {
         let (_temp, ctx, definition) = native_context();
         let mut runner = restart_runner(&definition);
@@ -946,6 +979,9 @@ mod tests {
         for (state, pid, foreign, code) in [
             ("future-state", None, false, "status_required"),
             ("future-state", Some("42"), false, "status_required"),
+            ("sigtermed", Some("42"), false, "status_required"),
+            ("SIGTERMed", None, false, "status_required"),
+            ("SIGTERMed", Some("0"), false, "status_required"),
             ("running", Some("garbage"), false, "status_required"),
             ("running", Some("43"), true, "native_conflict"),
         ] {
@@ -1075,6 +1111,8 @@ mod tests {
             ("running", None),
             ("future-state", None),
             ("future-state", Some("42")),
+            ("SIGTERMed", Some("42")),
+            ("SIGTERMed", None),
             ("running", Some("0")),
         ] {
             let (_temp, ctx, definition) = native_context();
