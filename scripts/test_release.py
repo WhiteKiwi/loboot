@@ -99,6 +99,23 @@ class ReleaseTests(unittest.TestCase):
             for member, content in entries:
                 archive.addfile(member, io.BytesIO(content) if content is not None else None)
 
+    def test_dependency_inventory_uses_only_reachable_filtered_graph(self):
+        metadata = {"packages": [
+            {"id": name, "name": name, "version": "1.0.0"}
+            for name in ("loboot", "native", "transitive", "foreign")],
+            "resolve": {"root": "loboot", "nodes": [
+                {"id": "loboot", "dependencies": ["native"]},
+                {"id": "native", "dependencies": ["transitive"]},
+                {"id": "transitive", "dependencies": []},
+                {"id": "foreign", "dependencies": []}]}}
+        self.assertEqual([p["id"] for p in release.dependency_packages(metadata)],
+                         ["loboot", "native", "transitive"])
+        metadata["resolve"]["nodes"][1]["dependencies"].append("missing")
+        with self.assertRaisesRegex(release.ReleaseError, "missing package"):
+            release.dependency_packages(metadata)
+        with self.assertRaisesRegex(release.ReleaseError, "root"):
+            release.dependency_packages({"packages": []})
+
     def test_strict_versions(self):
         for version in ("0.1.0", "1.2.3", "10.20.300"):
             self.assertEqual(release.validate_version(version), version)

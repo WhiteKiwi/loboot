@@ -329,6 +329,27 @@ def require_empty_output(output: Path) -> None:
         raise ReleaseError(f"output must be absent or an empty directory: {output}")
 
 
+def dependency_packages(metadata: dict) -> list[dict]:
+    """Select packages reachable through Cargo's target-filtered resolve graph."""
+    resolve = metadata.get("resolve") or {}
+    root = resolve.get("root")
+    nodes = {node["id"]: node for node in resolve.get("nodes", [])}
+    packages = {package["id"]: package for package in metadata.get("packages", [])}
+    if root not in nodes or root not in packages:
+        raise ReleaseError("Cargo metadata has no root resolve node")
+    reachable, pending = set(), [root]
+    while pending:
+        identifier = pending.pop()
+        if identifier in reachable:
+            continue
+        if identifier not in nodes or identifier not in packages:
+            raise ReleaseError("Cargo resolve graph references a missing package")
+        reachable.add(identifier)
+        pending.extend(nodes[identifier]["dependencies"])
+    return sorted((packages[identifier] for identifier in reachable),
+                  key=lambda package: (package["name"], package["version"]))
+
+
 def third_party_notices(repo: Path, target: str) -> dict[str, bytes]:
     """Include locked target dependencies and their upstream notice texts.
 
@@ -340,7 +361,7 @@ def third_party_notices(repo: Path, target: str) -> dict[str, bytes]:
     parts = ["Third-party components from the locked Cargo dependency graph.\n"
              "Development/build dependencies are included conservatively.\n"
              "MIT is selected wherever offered; Unicode-3.0 also applies to unicode-ident.\n"]
-    for package in sorted(metadata["packages"], key=lambda p: (p["name"], p["version"])):
+    for package in dependency_packages(metadata):
         if package["name"] == "loboot" and package.get("source") is None:
             continue
         expression = package.get("license") or ""

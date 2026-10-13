@@ -17,7 +17,7 @@ This file records user-facing changes. Versioned entries supply the curated GitH
 
 - Owner-approved MIT OR Apache-2.0 licensing, including license texts and third-party/Rust runtime notices in binary archives.
 - Native x64/ARM64 macOS and Linux archive matrix with architecture/version checks, exact inventory, SHA-256 checksums, and downloaded-binary smoke validation.
-- Homebrew formula generation from the verified release manifest; the tap owns token-free periodic updates. No `brew services` integration is installed.
+- Homebrew formula generation from the verified release manifest; the tap owns periodic updates using its own ephemeral token, without a cross-repository credential. No `brew services` integration is installed.
 - Separate [WhiteKiwi/skills integration](https://github.com/WhiteKiwi/skills) for assistant instructions; installing a skill does not install the CLI.
 
 ### Changed
@@ -30,7 +30,7 @@ This file records user-facing changes. Versioned entries supply the curated GitH
 
 ### Known limits
 
-- Real host lifecycle/login acceptance remains pending; CI does not operate real services.
+- Real logout/login acceptance remains pending. Disposable hosted lifecycle checks report their own results separately from ordinary offline tests.
 - Experimental first release: lifecycle/login acceptance remains restricted to the evidence reported in CI; no real logout/login acceptance is claimed. macOS archives are unsigned/unnotarized; Linux binaries target Ubuntu 24.04/glibc 2.39 or newer.
 - No crates.io or ClawHub publication is included. Installing the binary never enables or starts a service.
 - Built-in logs, secrets/environment configuration, automatic recovery, Windows, system/boot scope, and external-service adoption are deferred.

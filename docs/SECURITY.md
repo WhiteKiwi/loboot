@@ -1,6 +1,6 @@
 # Security and trust boundaries
 
-loboot is an early, unprivileged user-service manager. It has not completed real-host lifecycle acceptance or a security audit. Source availability is not a security certification or a license grant.
+loboot is an early, unprivileged user-service manager. Full logout/login acceptance and a security audit remain pending. Source availability and passing tests are not security certifications; the project license is MIT OR Apache-2.0.
 
 ## What is guarded
 
@@ -35,4 +35,4 @@ Useful evidence includes the exact source revision, `loboot --version`, OS/archi
 
 ## Distribution boundary
 
-Current installation is from source. Manual packaging rehearsal produces unsigned CI artifacts, not a supported public release. SHA-256 checksums detect changed bytes; they are not independent publisher authentication. Public releases remain gated on licensing, version/release approval, and the acceptance work in [RELEASE.md](RELEASE.md). Do not bypass OS executable protections to try an unverified artifact.
+Source builds, experimental GitHub release archives, and the WhiteKiwi Homebrew formula are described in [installation](INSTALL.md). Packaging rehearsal artifacts are not a published release. SHA-256 checksums detect changed bytes; they are not independent publisher authentication. macOS archives are unsigned/unnotarized. Publication requires the approved version, exact-revision checks, license notices, and gates in [RELEASE.md](RELEASE.md). Do not bypass OS executable protections to try an unverified artifact.

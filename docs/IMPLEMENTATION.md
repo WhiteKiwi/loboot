@@ -39,7 +39,7 @@ No native end-to-end claim can be inferred from unit tests or a macOS runner mer
 
 ## Deferred work
 
-Native lifecycle evidence; automated explicit recovery; logs command; richer read-only discovery; Windows/system scope. These are visible limitations rather than placeholder success responses.
+Real logout/login activation evidence; automated explicit recovery; logs command; richer read-only discovery; Windows/system scope. These are visible limitations rather than placeholder success responses.
 
 ## Recorded verification evidence
 
@@ -66,4 +66,4 @@ Dependency review found MIT-compatible choices throughout the locked graph, with
 
 ### First hosted native rehearsal
 
-At PR #5 head `3fec464`, both Linux x64 and ARM64 lifecycle fixtures passed, including once/service/failure cases and cleanup ([run 38419342509](https://github.com/WhiteKiwi/loboot/actions/runs/38419342509)). Both macOS lanes exposed a real disabled-override parser incompatibility after installation. Modern launchctl reports `enabled`/`disabled`, while the original parser expected only legacy booleans; [the macOS Security Compliance Project recorded this format change](https://github.com/usnistgov/macos_security/issues/167). The release remains blocked until the fix and all native packaging lanes pass. These are revision-specific results, not a claim that the final release has already passed.
+At PR #5 head `3fec464`, both Linux x64 and ARM64 lifecycle fixtures passed, including once/service/failure cases and cleanup ([run 38419342509](https://github.com/WhiteKiwi/loboot/actions/runs/38419342509)). Both macOS lanes exposed a real disabled-override parser incompatibility after installation. Modern launchctl reports `enabled`/`disabled`, while the original parser expected only legacy booleans; [the macOS Security Compliance Project recorded this format change](https://github.com/usnistgov/macos_security/issues/167). This failed run was rejected before publication. The parser fix must pass all native packaging lanes before release. Results are revision-specific; consult the final release workflow for exact tagged-revision evidence.
