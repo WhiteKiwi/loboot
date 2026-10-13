@@ -24,6 +24,10 @@ This file records user-facing changes. Versioned entries supply the curated GitH
 
 - Align release automation with locron: version-tag pushes trigger publication automatically, and curated tagged changelog entries supply release notes. Main-branch merges do not release.
 
+### Fixed
+
+- Parse modern macOS launchctl `enabled`/`disabled` overrides as well as legacy `false`/`true`, while refusing unknown values. The first real hosted lifecycle test caught this before v0.1.0 publication.
+
 ### Known limits
 
 - Real host lifecycle/login acceptance remains pending; CI does not operate real services.

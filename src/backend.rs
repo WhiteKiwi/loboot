@@ -777,9 +777,12 @@ fn parse_disabled_override(label: &str, stdout: &str) -> Result<Option<bool>> {
             )
         })?;
         if key == expected {
-            let disabled = match value.trim_end_matches(';') {
-                "true" => true,
-                "false" => false,
+            // Monterey and older report booleans; Ventura and newer report
+            // named states. Accept only these exact spellings (plus one optional
+            // diagnostic separator), never a prefix or an unknown future state.
+            let disabled = match value.strip_suffix(';').unwrap_or(value) {
+                "true" | "disabled" => true,
+                "false" | "enabled" => false,
                 _ => {
                     return Err(Error::new(
                         "status_unavailable",
@@ -1231,6 +1234,80 @@ mod tests {
                 "status_unavailable"
             );
         }
+    }
+
+    #[test]
+    fn mac_disabled_override_accepts_legacy_and_modern_exact_values() {
+        for (value, disabled) in [
+            ("true", true),
+            ("false", false),
+            ("disabled", true),
+            ("enabled", false),
+        ] {
+            for suffix in ["", ";"] {
+                let text = format!(
+                    "disabled services = {{\n\t\"com.loboot.example-other\" => disabled\n\t\"com.loboot.example\" => {value}{suffix}\n}}\n"
+                );
+                assert_eq!(
+                    parse_disabled_override("com.loboot.example", &text).unwrap(),
+                    Some(disabled),
+                );
+            }
+            let mut runner = FakeRunner {
+                outputs: VecDeque::from([
+                    output(
+                        false,
+                        113,
+                        "",
+                        "Could not find service \"com.loboot.example\" in domain for user gui: 501",
+                    ),
+                    output(
+                        true,
+                        0,
+                        &format!("disabled services = {{\n\"com.loboot.example\" => {value}\n}}\n"),
+                        "",
+                    ),
+                ]),
+                ..Default::default()
+            };
+            let status = Platform::Macos
+                .status_with_context("example", 501, &mut runner)
+                .unwrap();
+            assert_eq!(status.enabled, Some(!disabled));
+            assert_eq!(status.raw["disabled_override"], disabled.to_string());
+        }
+    }
+
+    #[test]
+    fn mac_disabled_override_rejects_ambiguous_modern_values() {
+        for value in [
+            "Disabled",
+            "ENABLED",
+            "disabled-later",
+            "enabled true",
+            "not disabled",
+            "1",
+            "0",
+            "disabled;;",
+            "true;;",
+            "\"disabled\"",
+            "",
+        ] {
+            let text = format!("disabled services = {{\n\"com.loboot.example\" => {value}\n}}\n");
+            assert_eq!(
+                parse_disabled_override("com.loboot.example", &text)
+                    .unwrap_err()
+                    .code,
+                "status_unavailable",
+            );
+        }
+        let duplicate = "disabled services = {\n\"com.loboot.example\" => enabled\n\"com.loboot.example\" => disabled\n}\n";
+        assert_eq!(
+            parse_disabled_override("com.loboot.example", duplicate)
+                .unwrap_err()
+                .code,
+            "status_unavailable",
+        );
     }
 
     #[test]

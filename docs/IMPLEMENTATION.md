@@ -63,3 +63,7 @@ Subsequent documentation/release infrastructure uses the checks described in [RE
 4. Publish only the approved version tag after exact-revision checks. Verify: downloaded release assets and hashes, followed by tap installation/tests.
 
 Dependency review found MIT-compatible choices throughout the locked graph, with the additional Unicode-3.0 notice for unicode-ident. Packaging includes target-filtered build/dev dependencies conservatively, their upstream license/notice texts, and the pinned Rust toolchain’s standard-library copyright inventory. This is a recorded dependency inventory review, not a blanket legal warranty.
+
+### First hosted native rehearsal
+
+At PR #5 head `3fec464`, both Linux x64 and ARM64 lifecycle fixtures passed, including once/service/failure cases and cleanup ([run 38419342509](https://github.com/WhiteKiwi/loboot/actions/runs/38419342509)). Both macOS lanes exposed a real disabled-override parser incompatibility after installation. Modern launchctl reports `enabled`/`disabled`, while the original parser expected only legacy booleans; [the macOS Security Compliance Project recorded this format change](https://github.com/usnistgov/macos_security/issues/167). The release remains blocked until the fix and all native packaging lanes pass. These are revision-specific results, not a claim that the final release has already passed.
