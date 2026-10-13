@@ -24,7 +24,7 @@ python3 scripts/check_docs.py
 
 Use `--offline` for Cargo when dependencies are already cached. CI also runs stable Rust tests on Linux/macOS and a pinned 1.99.0 Linux compatibility lane. [Release process](docs/RELEASE.md) describes the separate artifact rehearsal and publication gates.
 
-Ordinary tests and validation CI must never register, enable, start, stop, or remove a real host job. The release-readiness workflow explicitly opts into `scripts/native_smoke.py` only on disposable GitHub-hosted runners, recording passed, skipped, or failed lifecycle evidence separately. Use fake `Runner` implementations for native command sequences and `--root` sandboxes for filesystem/CLI checks. Native acceptance needs explicit authorization and an isolated disposable login account; follow [the protocol](docs/IMPLEMENTATION.md#opt-in-isolated-native-validation-protocol-pending).
+Ordinary tests and validation CI must never register, enable, start, stop, or remove a real host job. The release-readiness workflow explicitly opts into `scripts/native_smoke.py` only on disposable GitHub-hosted runners, recording passed, skipped, or failed lifecycle evidence separately. Use fake `Runner` implementations for native command sequences and `--root` sandboxes for filesystem/CLI checks. Native acceptance needs explicit authorization and an isolated disposable login account; follow [the protocol](docs/LOGIN-ACCEPTANCE.md).
 
 ## Where changes belong
 

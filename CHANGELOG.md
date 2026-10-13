@@ -4,6 +4,10 @@ This file records user-facing changes. Versioned entries supply the curated GitH
 
 ## Unreleased
 
+### Added
+
+- Explicit isolated-account logout/login acceptance protocol, scoped invocation fixture, and bounded offline evidence validation. Synthetic tests verify report consistency only; real Linux/macOS session acceptance remains pending.
+
 ### Fixed
 
 - Omit redundant Homebrew version metadata; Homebrew infers the version from all four archive URLs. The v0.1.0 tap formula applies the same one-line correction without changing any published release asset.
