@@ -57,7 +57,7 @@ Platform prerequisites matter:
 - Linux can explicitly start a disabled service while keeping it disabled.
 - macOS requires `enable` before `start` or `restart`. A loaded job must be stopped before `disable`. These refusals prevent hidden temporary preference changes or implicit stops.
 - macOS `stop` unloads the job with `bootout`, rather than merely signaling a `KeepAlive` process that could respawn. Stop and loaded restart wait for the old label and observed process IDs to disappear. Restart then rechecks ownership and enabled preference before one bootstrap, avoiding a teardown race or an extra kickstart of a short job. A timeout/uncertain observation stops with partial-progress evidence; inspect status before deciding what to do next.
-- Linux definition/lifecycle changes include native reloads. macOS `add` records a disabled native preference before exposing a new plist.
+- Ordinary Linux definition/lifecycle changes include native reloads; explicit filesystem recovery does not. macOS `add` records a disabled native preference before exposing a new plist.
 
 A normal lifecycle is:
 
@@ -140,8 +140,20 @@ These live paths are based on `HOME`; this version has no XDG or custom live-sta
 
 A stored record is **not** an input manifest: it is TOML metadata plus a `[manifest]` table and the exact expected native bytes. Keep your original manifest separately. Do not edit generated files or records to change a service; use `update`. Back up the record and definition together, and retain any pending journal before attempting recovery.
 
+## Explicit filesystem recovery (unreleased)
+
+If an interrupted change leaves `.pending.json`, stop normal mutations and preserve private backups. Source builds after v0.1.0 provide `recover plan` and `recover apply`; published v0.1.0 binaries do not. Follow the [full recovery procedure](TROUBLESHOOTING.md#interrupted-filesystem-change) before applying anything.
+
+From a private directory outside the managed state/native directories, save `loboot recover plan --to before --json > recovery.json` to a new file after setting `umask 077`. The default target is `before`; use `--to after` only to deliberately complete the interrupted pair. Review the exact before/after definitions, journal/current-state snapshot, file metadata and intended target. Keep the plan at mode 0600: it can contain sensitive plaintext arguments and paths. Do not share it or edit it to override checks.
+
+`loboot recover apply recovery.json --dry-run --json` previews without writes, locks or native queries. `loboot recover apply recovery.json --json` explicitly re-reads under the exclusive lock and refuses a plan that no longer exactly matches. Live apply requires Linux not running or macOS unloaded; an absent target also requires safe disabled/no-activation state. Prepare those conditions deliberately with verified platform tools while ordinary loboot commands are blocked. Recovery never stops, starts, enables, disables or reloads the job, and does not restore native runtime or preferences.
+
+The original journal stays until the selected record/native pair is verified. An interrupted apply needs a fresh plan; a completed replay refuses with `no_pending_recovery` and makes no changes. A fresh plan after completion reports `pending: false`. Unknown, foreign, drifted, symlinked, hardlinked, malformed or stale evidence is not force-repaired.
+
+Both stored record schemas are supported. A schema-2 target needs a complete verified existing capture generation. A partial log initialization can roll back to a safe schema-1/absent `before` target, retaining the remnants for investigation. Recovery never deletes, adopts, initializes or truncates logs; a schema-2 `before` target must also have complete capture. Neither filesystem recovery nor downgrading the binary restores the original native preference.
+
 ## Offline and dry-run behavior
 
-`--root /absolute/physical/path` isolates filesystem work and prohibits all native manager execution. `--platform linux|macos` selects rendering only with `--root`. Offline `add`, `update`, and `remove` can modify sandbox files; runtime commands require `--dry-run` there.
+`--root /absolute/physical/path` isolates filesystem work and prohibits all native manager execution. `--platform linux|macos` selects rendering only with `--root`. Offline `add`, `update`, `remove`, and explicit `recover apply` can modify sandbox files; runtime commands require `--dry-run` there. Use the same root and platform for recovery planning, preview, and apply. Offline recovery does not query or certify a live job's native state.
 
 Dry-run reads existing files but performs no writes, directory/lock creation, manager calls, or repairs. Native state remains unknown, so a macOS plan can list conditional loaded/unloaded branches. Preconditions are rechecked on apply; a preview is not a transaction or a guarantee that a later invocation will succeed.

@@ -23,6 +23,7 @@ Do not retry a mutating command blindly after a native failure. Some steps may a
 | `stop_first`, `service_not_stopped` | Stop the job before loaded macOS disable or definition update/removal. A finished macOS process may still have a loaded job. |
 | `service_not_disabled` | Removal requires a stopped job and disabled future activation. |
 | `store_busy`, `stale_plan`, `state_changed` | Another operation is active or the filesystem changed. Wait for it, inspect state, and prepare a fresh plan. Do not delete the lock file to bypass coordination. |
+| `no_pending_recovery` | No journal remains for the supplied plan. A completed replay makes no changes; run `recover plan --json` to inspect current pending state rather than recreating the journal. |
 | `status_required`, `status_unavailable`, `native_output` | Native observations are incomplete or unrecognized. Retain sanitized raw output; unknown is not stopped/disabled. |
 | `unsupported_capability` | The requested backend capability is unavailable; inspect the command and platform. |
 
@@ -49,20 +50,47 @@ A nonzero native status result can mean an inactive/missing job; inspect its con
 
 ## Interrupted filesystem change
 
-`recovery_required` means the state directory contains `.pending.json`. Normal record reads and mutations are blocked; `doctor` reports the blocker. There is no automatic recovery command in this version.
+`recovery_required` means the state directory contains `.pending.json`. Normal record reads and mutations are blocked; `doctor` reports the blocker. Source builds after v0.1.0 offer explicit `recover plan` / `recover apply`; neither runs automatically. Check `loboot recover --help` on the binary you actually use. Published v0.1.0 binaries do not include these commands.
 
-Use a deliberate, manual recovery in the intended account:
+### Review and recover with a source build
 
-1. Stop issuing loboot mutations. Inspect the exact native job with platform tools. If it must be stopped for recovery, stop only that verified owned job; this is a real runtime change.
-2. Back up the entire loboot state directory, relevant native definition, and journal. Preserve original bytes and permissions; do not remove evidence first.
-3. Read the journal's `schema_version`, `operation`, `id`, `state_dir`, `native_dir`, `before`, and `after`. Verify that its paths and ID are the expected account/resources. Do not execute commands or follow arbitrary paths merely because a damaged journal contains them.
-4. Choose one consistent outcome: restore the **before pair**, or complete the **after pair**. A non-null record contains the TOML metadata/`[manifest]` values and exact `native_bytes`. Restore the record as TOML and its native file as those exact bytes. A null record means both corresponding service files should be absent. The JSON journal itself is not a TOML record or input manifest.
-5. Verify both files agree with that chosen record and with the current renderer. Preserve correct ownership, restrictive permissions, and non-symlinked paths. If neither candidate is trustworthy, stop and seek review rather than guessing.
-6. Only after that verification, remove the pending journal. Run `loboot doctor --json`, then `loboot show ID --json` for a retained record. Inspect native state again before any deliberate reload/start/enable.
+1. Stop issuing normal loboot mutations. Inspect the exact owned native job using platform tools. Live recovery requires Linux not running or macOS unloaded, not merely a process that has finished. When the intended target has no record/definition, future activation must also be safely disabled/absent. If a stop/unload or preference change is needed, perform only that separately authorized change to the verified owned job, then inspect again. Recovery itself does not do it, and ordinary loboot lifecycle commands remain blocked by the journal.
+2. Back up the state directory, relevant native definition, journal, and any log remnants privately. Preserve original bytes and permissions. Do not remove evidence, repair permissions, or follow paths merely because a damaged journal mentions them.
+3. Choose one consistent filesystem outcome: restore **before** (the default), or complete **after**. A null target means both the service record and native definition should be absent. From a private directory outside the managed state/native trees, save a new plan with restrictive permissions:
 
-The journal covers filesystem pairs, not the service manager's state. Restoring files does not undo an earlier native command or persistent enable/disable preference. macOS add can leave a new label disabled if its subsequent file commit fails. Recovery must preserve that distinction.
+   ```sh
+   umask 077
+   loboot recover plan --to before --json > recovery.json
+   ```
 
-Do not delete `.pending.json` just to clear the error, copy one side of a pair alone, blindly replay starts, or use recursive cleanup against a shared native directory.
+   For `after`, request a separate new plan with `--to after`; never edit a saved plan. Check the exit status and `ok` before using its output. A plan without a journal reports `pending: false`; there is nothing to apply. `umask` does not tighten an existing file's permissions, so use a new filename and verify mode 0600. Plans contain exact raw definitions, argv, paths, journal/current-state evidence and file metadata, not sanitized diagnostics. Never share a raw plan.
+4. Review the account, root/platform, paths, ID, operation, target, before/after definitions, and current snapshot. Both schemas 1 and 2 are supported, but unknown/malformed data, foreign or drifted bytes, unsafe links, and stale snapshots are refused. If neither outcome can be verified safely, preserve everything and seek review; there is no force option.
+5. Preview the unmodified saved plan, then apply only when its target is what you intend:
+
+   ```sh
+   loboot recover apply recovery.json --dry-run --json
+   ```
+
+   The preview performs no writes, locking, or native queries. It does not verify live stopped/disabled preconditions. Once reviewed:
+
+   ```sh
+   loboot recover apply recovery.json --json
+   ```
+
+   Apply acquires the exclusive lock, re-reads the evidence, requires an exact fresh plan and checks live native prerequisites before changing the pair. For an offline sandbox, supply the same `--root` and `--platform` to all three commands; no native calls occur and no live safety is certified.
+6. On success, run `loboot recover plan --json` and confirm `pending: false`; run `loboot doctor --json`, and `loboot show ID --json` if a record was retained. Inspect native state before any separate, deliberate reload/start/enable. Recovery does not run `daemon-reload` or any stop/start/enable/disable action.
+
+The original journal remains until the selected record/native pair is verified. `recovery_cleanup_uncertain` means that pair was verified but journal removal/durability could not be confirmed; inspect a fresh plan instead of assuming the journal still exists. If apply fails after partial filesystem progress, preserve the original journal and make a **fresh** plan from the new state. Replaying a completed plan returns `no_pending_recovery` without changes, rather than repeating a deletion or write. A missing journal by itself is not permission to reconstruct ownership.
+
+For macOS schema-2 records, the selected target must have a complete, verified existing capture generation. Recovery will not finish an interrupted log initialization. An earlier interruption can safely roll back to a valid schema-1/absent `before` pair while preserving the partial log generation; a schema-2 `before` pair still requires its own complete capture. No recovery direction deletes, adopts, truncates, or initializes log files or remnants.
+
+The journal covers filesystem pairs, not the service manager's state. Restoring files does not undo earlier native commands or persistent enable/disable preferences. macOS add can leave a new label disabled if its subsequent file commit fails. Inspect and address that separately, never by assuming the filesystem target represents native state.
+
+### Published v0.1.0 / unsupported evidence
+
+The published v0.1.0 binary has only a manual recovery procedure. Preserve private backups and obtain careful review before touching the pair: verify the journal's account, paths, schema, operation, ID and before/after records; restore one complete trustworthy pair; verify the stored record, exact native bytes and renderer agree; only then remove the journal and inspect with `doctor` and `show`. A stored record is TOML metadata plus `[manifest]`, not the JSON journal or an ordinary input manifest. v0.1.0 cannot manage schema-2 records.
+
+If the source recovery command refuses unknown/foreign/drifted/malformed evidence, do not treat manual editing as a force-mode workaround. Stop for investigation. Never delete `.pending.json` merely to clear the error, copy only one side of a pair, blindly replay starts, or recursively clean a shared native directory.
 
 ## Reporting a reproducible issue
 

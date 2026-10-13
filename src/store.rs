@@ -19,6 +19,10 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
+#[path = "recovery.rs"]
+mod recovery;
+pub use recovery::{RECOVERY_PLAN_LIMIT, RecoveryOutcome, RecoveryPlan, RecoveryTarget, read_recovery_plan_file};
+
 const LIMIT: u64 = 4 * 1024 * 1024;
 const JOURNAL: &str = ".pending.json";
 static NONCE: AtomicU64 = AtomicU64::new(0);
@@ -53,7 +57,7 @@ impl Plan {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Journal {
     schema_version: u32,
@@ -61,8 +65,20 @@ struct Journal {
     id: String,
     state_dir: PathBuf,
     native_dir: PathBuf,
+    #[serde(deserialize_with = "required_option")]
     before: Option<Record>,
+    #[serde(deserialize_with = "required_option")]
     after: Option<Record>,
+}
+
+// Unlike serde's default Option behavior, journal/plan endpoints must be
+// explicitly present even when null. Missing evidence is not recorded absence.
+fn required_option<'de, D, T>(deserializer: D) -> std::result::Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
 }
 
 #[derive(Debug, Clone)]
