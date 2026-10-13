@@ -1,74 +1,112 @@
 # loboot
 
-A small Rust CLI for native user services: launchd on macOS, systemd --user on Linux. No daemon, database, shell command strings, or root privileges.
+[![CI](https://github.com/WhiteKiwi/loboot/actions/workflows/ci.yml/badge.svg)](https://github.com/WhiteKiwi/loboot/actions/workflows/ci.yml)
 
-**Early v0.1, draft implementation.** Mock/offline verification is separate from real login-session validation. See [verification](docs/IMPLEMENTATION.md). License selection is pending the repository owner's decision; no license grant is implied by this repository being public.
+Native user services, explicit plans, no daemon.
 
-## Build
+`loboot` installs and manages your own launchd jobs on macOS and systemd user services on Linux. Runtime actions and login activation stay separate. There is no background loboot process, database, or implicit shell evaluation.
+
+**Early v0.1.** Source builds only. Linux/macOS CI checks use fake service managers and offline filesystems; real login-session lifecycle validation is still pending. The license is undecided, and public source availability does not grant a license. See [verification](docs/IMPLEMENTATION.md) and [release gates](docs/RELEASE.md).
+
+## Build and install
+
+Requires Rust **1.99.0**, Git, and a native compiler/linker on macOS or Linux. The repository pins the development toolchain. Live Linux operations require systemd 240+ and a reachable user manager; macOS operations require a graphical login session.
 
 ```sh
-cargo build --locked --release
-cargo test --locked --all-targets
-cargo clippy --locked --all-targets -- -D warnings
+git clone https://github.com/WhiteKiwi/loboot.git
+cd loboot
+cargo install --path . --locked
+loboot --version
 ```
 
-Requires Rust 1.99 or newer (the locally tested toolchain). Only macOS and Linux are implementation targets.
+Ensure Cargo's bin directory is on your `PATH`. There is no published crates.io package, Homebrew formula, download installer, or supported Windows build. Installing the binary does not register or start a service. [Installation, updating, and uninstalling →](docs/INSTALL.md)
 
-## Quick add
+## Try the workflow safely
+
+This writes only an explicit sandbox and never contacts a service manager. Resolving the temporary directory with `pwd -P` avoids symlinked paths such as macOS `/tmp`.
 
 ```sh
+sandbox="$(mktemp -d)"
+sandbox="$(cd "$sandbox" && pwd -P)"
+
+loboot --root "$sandbox" --platform linux add hello --mode once \
+  -- /usr/bin/printf 'Hello from loboot\n'
+loboot --root "$sandbox" --platform linux start hello --dry-run --json
+loboot --root "$sandbox" --platform linux list --json
+loboot --root "$sandbox" --platform linux remove hello
+```
+
+Use `--platform macos` in a separate sandbox to inspect launchd plans. `--root` always means offline: an actual `start`, `status`, or other runtime operation is refused. `--dry-run` performs filesystem reads only and does not create directories, locks, definitions, or recovery changes.
+
+## Manage a real user service
+
+The following commands change your login account's service configuration. Read the [operator guide](docs/OPERATOR.md) first and use a unique ID. The executable must be an existing absolute, non-symlinked path; arguments are passed literally. The current physical directory becomes the working directory unless `--cwd` is supplied.
+
+```sh
+loboot doctor --json
+loboot add hello --mode once --dry-run -- /usr/bin/printf 'Hello from loboot\n'
 loboot add hello --mode once -- /usr/bin/printf 'Hello from loboot\n'
-```
-
-The executable must be absolute; the current directory becomes the working directory unless `--cwd` is given. Use TOML when you want a reusable definition.
-
-## Define a service
-
-```toml
-id = "hello"
-executable = "/usr/bin/printf"
-args = ["Hello from loboot\\n"]
-cwd = "/Users/you"
-mode = "once"
-restart = "never"
-```
-
-Use existing, absolute executable and working-directory paths. Arguments are passed directly, without shell expansion. `once` means no automatic retries, not a permanent deduplication guarantee; explicit starts can run it again. `service` supports `never`, `on-failure`, and `always` restart policies. Unknown fields and secret/environment features are rejected. Symlinked input/executable/cwd paths are refused: supply their real canonical paths (for example `/private/tmp` rather than `/tmp` on macOS). Linux requires systemd 240+; executable names containing quotes, backslashes, or glob metacharacters are rejected by the native parser, although ordinary argv can contain them.
-
-```sh
-loboot add hello.toml --dry-run --json
-loboot add hello.toml
-loboot enable hello --dry-run
 loboot enable hello
 loboot start hello
 loboot status hello --json
+
+# Stop runtime activity before disabling future activation and removing the definition.
 loboot stop hello
 loboot disable hello
 loboot remove hello --dry-run
+loboot remove hello
 ```
 
-`add` installs a disabled definition without starting it. `enable` changes future activation without starting; `start` changes runtime without enabling. On macOS, start/restart of a disabled job is refused: explicitly enable it first. macOS disable requires `stop` first if the job is loaded. `stop` preserves enabled preference. Update and removal require the job to be stopped; removal also requires disabled persistence. Definition updates never restart implicitly.
+`add` installs a disabled definition without starting it. `enable` permits future activation without starting it now; `stop` leaves the enabled preference unchanged. On macOS, enable before start/restart and stop before disabling a loaded job. Updates require a stopped job and never restart it implicitly.
 
-Linux “login” means user-manager activation. Lingering and overlapping sessions may keep that manager alive across logouts. loboot does not change linger settings. macOS uses the graphical `gui/<uid>` session and `~/Library/LaunchAgents`.
+`once` means no automatic retries, not permanent deduplication. Explicit starts and later user-manager/login activations can run the command again. Linux activation follows the user manager's lifetime, which lingering or overlapping sessions may extend beyond a logout. loboot never changes linger settings.
 
-## Safe offline trial
+## Reusable definitions
+
+Save a TOML manifest with real paths for your account:
+
+```toml
+id = "worker"
+executable = "/opt/my-app/bin/worker"
+args = ["--foreground"]
+cwd = "/opt/my-app"
+mode = "service"
+restart = "on-failure"
+```
 
 ```sh
-loboot --root /absolute/path/to/sandbox --platform linux add hello.toml
-loboot --root /absolute/path/to/sandbox --platform linux start hello --dry-run --json
-loboot --root /absolute/path/to/sandbox --platform linux list
+loboot explain worker.toml --json
+loboot add worker.toml --dry-run --json
+loboot add worker.toml
 ```
 
-`--root` is an explicit offline filesystem sandbox. Native execution is prohibited even if a service manager happens to be available. Cross-platform rendering requires `--root`. Dry-run never creates directories/locks, writes state, calls a manager, or repairs anything. Plans are conditional where current manager state is unknown.
+Modes are `once` and `service`. Restart policies are `never`, `on-failure`, and `always`; `once` requires `never`. Unknown fields, environment/secret configuration, relative executable/cwd paths, and symlinked paths are rejected. See the [CLI contract](docs/CLI.md) for validation and JSON details.
 
-## Safety and limits
+## Capability matrix
 
-- Only exact managed definitions can be changed; external services are read-only.
-- Managed paths reject symlinks, traversal, foreign files, and drift. No `--force` adoption.
-- Filesystem updates are journaled, not a fictional cross-filesystem transaction. Interrupted writes block further work and preserve before/after evidence. See [recovery](docs/ARCHITECTURE.md#recovery).
-- Native command failure reports completed-prefix information; inspect `status` before retrying. A successful command is not proof that a process remains running.
-- `discover` lists definition files in the configured native directory only; it is not a machine-wide inventory.
-- `logs` currently returns `unsupported_capability`; use native logging tools. Boot/system scope, Windows, secrets, shell interpretation, and automatic adoption are deferred.
-- Arguments and paths are stored in plaintext definitions. Do not put passwords or tokens in argv.
+| Capability | Linux | macOS |
+| --- | --- | --- |
+| Native backend | systemd `--user` | launchd `gui/<uid>` |
+| Add/update/remove owned definitions | Implemented | Implemented |
+| Start/stop/restart and observed status | Implemented | Implemented; enable before start/restart |
+| Separate future activation preference | Implemented | Implemented; stop before loaded-disable |
+| Offline plans, dry-run, versioned JSON | Implemented | Implemented |
+| Read-only discovery | Configured native directory only | Configured native directory only |
+| Real login-session acceptance | Pending | Pending |
+| Built-in logs, secrets, boot/system scope | Deferred | Deferred |
 
-[Specification](docs/SPEC.md) · [Architecture](docs/ARCHITECTURE.md) · [CLI](docs/CLI.md) · [Implementation and checks](docs/IMPLEMENTATION.md)
+Windows, adoption of external services, automatic recovery, and release/package distribution are also outside the current implementation.
+
+## Safety and automation
+
+- Only exact managed definitions may be changed. Foreign files, native overrides, drift, unsafe paths, and interrupted filesystem transactions cause explicit errors; there is no force-adoption flag.
+- `--json` returns a `loboot.cli/v1` envelope. Check both the exit status and `ok`; `doctor` also requires checking its nested state/session diagnostics.
+- Native failures can occur after some commands succeeded. Inspect status before retrying; command acceptance is not proof that a process remains running.
+- Arguments and paths are plaintext. Do not put credentials in them. loboot does not sandbox the program you choose to run.
+- Cross-directory filesystem updates are journaled; manager actions are not transactional. Follow the [recovery procedure](docs/TROUBLESHOOTING.md#interrupted-filesystem-change) instead of deleting a journal blindly.
+
+## Documentation
+
+[Docs index](docs/README.md) · [Operator guide](docs/OPERATOR.md) · [Troubleshooting](docs/TROUBLESHOOTING.md) · [Security](docs/SECURITY.md) · [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md)
+
+[Specification](docs/SPEC.md) · [Architecture](docs/ARCHITECTURE.md) · [CLI contract](docs/CLI.md) · [Verification](docs/IMPLEMENTATION.md) · [Release process](docs/RELEASE.md)

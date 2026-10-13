@@ -37,8 +37,16 @@ No native end-to-end claim can be inferred from unit tests or a macOS runner mer
 
 Native lifecycle evidence; automated explicit recovery; logs command; richer read-only discovery; Windows/system scope; license decision. These are visible limitations rather than placeholder success responses.
 
-## Current local evidence
+## Recorded verification evidence
 
 Cloud Linux, Rust 1.99.0: formatting check and Clippy with warnings denied pass; 46 tests pass (37 library, 2 CLI-unit, 7 subprocess integration). These tests include both native planners through fakes and Linux/macOS offline CLI flows. A generated macOS plist also parses with Python's plistlib and preserves literal argv.
 
-An additional systemd-analyze 257 syntax-check attempt could not run because its verification setup tried to create `/run/systemd` on a read-only filesystem. It did not register or run a service. This is a blocked check, not a pass. Real native lifecycle tests and remote CI remain unverified until separately run; CI configuration alone is not evidence of a result.
+An additional systemd-analyze 257 syntax-check attempt could not run because its verification setup tried to create `/run/systemd` on a read-only filesystem. It did not register or run a service. This is a blocked check, not a pass. This historical local restriction does not imply that hosted tests failed. Real native lifecycle tests remain pending; no unit, offline, packaging, or hosted compilation result establishes native login behavior.
+
+### Hosted implementation checks
+
+The initial implementation PR head `e9f03c9` passed Linux/macOS formatting, Clippy, and the 46-test suite in [run 38371124741](https://github.com/WhiteKiwi/loboot/actions/runs/38371124741). It merged as `0af5a30`; that exact main revision also passed [run 38371400030](https://github.com/WhiteKiwi/loboot/actions/runs/38371400030). These are historical results for those revisions, not evidence for later changes.
+
+An independent review also completed 20 additional offline CLI probes. Those probes exercised explicit sandbox behavior and refusal paths; they did not contact real native managers.
+
+Subsequent documentation/release infrastructure uses the checks described in [RELEASE.md](RELEASE.md). Verify the current commit's workflow results before merging or releasing; a workflow definition and a green previous revision are insufficient.
