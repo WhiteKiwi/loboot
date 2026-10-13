@@ -16,6 +16,7 @@ Start with the [repository README](../README.md) for installation options and an
 - [Specification](SPEC.md): product scope and behavior requirements.
 - [Architecture](ARCHITECTURE.md): model/backend/store boundaries and filesystem design.
 - [Implementation and verification](IMPLEMENTATION.md): test evidence and pending native acceptance.
+- [Real login acceptance](LOGIN-ACCEPTANCE.md): isolated-session protocol, scoped fixture, and honest evidence checks.
 - [Release process](RELEASE.md): CI, artifact rehearsal, and gates before distribution.
 - [Changelog](../CHANGELOG.md): versioned release notes and upcoming changes.
 

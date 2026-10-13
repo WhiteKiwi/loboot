@@ -27,17 +27,9 @@ Invocation: `python3 scripts/native_smoke.py --binary /absolute/loboot --allow-h
 
 ### Manual logout/login acceptance (pending)
 
-The following is a manual protocol, not an automatically executed test. Obtain authorization first; use a disposable logged-in account/session with no matching service labels. Never point it at an existing user job. Use a unique `loboot-e2e-<suffix>` ID and an absolute test executable that records invocations in an isolated directory.
+Use the [dedicated logout/login protocol](LOGIN-ACCEPTANCE.md), offline evidence template/validator, and scoped invocation fixture. The protocol requires separately authorized isolated sessions, an independent observer of actual manager/GUI-domain absence, enabled and disabled login cycles, and exact owned cleanup. A consistent operator report is not independent proof; original native evidence still needs human review.
 
-1. Capture initial native state and relevant paths. Add and verify zero runs and disabled persistence.
-2. Enable and verify zero immediate runs. Start once and verify exactly one invocation. Verify observed native fields without assuming long-lived running state.
-3. Start a service fixture, then stop and verify no KeepAlive respawn while enabled preference remains unchanged.
-4. Disable and verify no future activation. On macOS verify loaded-disable and disabled-start errors leave state unchanged.
-5. Test restart, stopped-definition update, missing session, one injected failing executable, and repeated commands.
-6. With separate consent for logout/login, verify login activation. Linux tests must account for user-manager lifetime and linger without changing linger settings.
-7. Stop, disable, remove only the uniquely created test resources; verify original state is unchanged and retain evidence.
-
-No native end-to-end claim can be inferred from unit tests or a macOS runner merely compiling the project.
+The new preparation tools and their synthetic tests do not change acceptance status. [Issue #9](https://github.com/WhiteKiwi/loboot/issues/9) remains open until actual Linux and macOS session evidence is recorded. No user session was logged out for this work.
 
 ## Deferred work
 
