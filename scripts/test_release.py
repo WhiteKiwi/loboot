@@ -299,6 +299,45 @@ class ReleaseTests(unittest.TestCase):
         with self.assertRaisesRegex(release.ReleaseError, "manifest"):
             release.verify_bundle(output, "0.1.0", LINUX, execute=False)
 
+    def test_notes_extract_only_the_exact_curated_version(self):
+        (self.repo / "CHANGELOG.md").write_text(
+            "# Changelog\n## [Unreleased]\nFuture.\n## [0.1.0] - 2026-10-13\n\n### Added\n- Exact release.\n\n## [0.0.9]\nOld.\n")
+        self.assertEqual(release.release_notes(self.repo, "v0.1.0"), "### Added\n- Exact release.\n")
+        with self.assertRaisesRegex(release.ReleaseError, "exactly"):
+            release.release_notes(self.repo, "v0.2.0")
+
+    def test_notes_reject_ambiguous_or_empty_sections(self):
+        for text in ("## [0.1.0]\nOne.\n## [0.1.0]\nTwo.\n", "## [0.1.0]\n\n## [0.0.9]\nOld.\n"):
+            (self.repo / "CHANGELOG.md").write_text(text)
+            with self.subTest(text=text), self.assertRaises(release.ReleaseError):
+                release.release_notes(self.repo, "v0.1.0")
+
+    def test_notes_cli_never_overwrites_an_existing_file(self):
+        output = self.root / "notes.md"
+        argv = ["notes", "--repo", str(self.repo), "--tag", "v0.1.0", "--output", str(output)]
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(release.main(argv), 0)
+        self.assertEqual(output.read_text(), "Initial version.\n")
+        with redirect_stderr(io.StringIO()):
+            self.assertEqual(release.main(argv), 1)
+        self.assertEqual(output.read_text(), "Initial version.\n")
+
+    def test_publication_trigger_matches_locron_without_main_release(self):
+        workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/release.yml").read_text()
+        triggers = workflow.split("\non:\n", 1)[1].split("\npermissions:", 1)[0]
+        self.assertEqual(triggers, "  push:\n    tags:\n      - 'v*.*.*'")
+        self.assertNotIn("workflow_dispatch", workflow)
+        self.assertNotIn("inputs.publish", workflow)
+        self.assertIn('--notes-file release-notes.md', workflow)
+        self.assertNotIn('--generate-notes', workflow)
+        self.assertIn('test "$GITHUB_EVENT_NAME" = push', workflow)
+        self.assertIn('test "$GITHUB_REF_TYPE" = tag', workflow)
+        self.assertIn('needs: [gate, readiness]', workflow)
+        self.assertEqual(workflow.count('contents: write'), 1)
+        readiness = (Path(__file__).resolve().parents[1] / ".github/workflows/release-readiness.yml").read_text()
+        for mutator in ('gh release create', 'cargo publish', 'git push'):
+            self.assertNotIn(mutator, readiness)
+
     def test_gate_fails_for_pending_license(self):
         with self.assertRaisesRegex(release.ReleaseError, "select license"):
             release.gate(self.repo, "v0.1.0")
