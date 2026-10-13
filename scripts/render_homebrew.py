@@ -32,7 +32,6 @@ def render(manifest: dict) -> str:
         "class Loboot < Formula",
         '  desc "Explicit native user-service management without a daemon"',
         f'  homepage "{SOURCE_REPOSITORY}"',
-        f'  version "{version}"',
         '  license any_of: ["MIT", "Apache-2.0"]',
         "", "  livecheck do",
         '    skip "Updated from verified release assets by the tap workflow"',

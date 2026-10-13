@@ -67,6 +67,8 @@ Existing-release replacement is intentionally not automatic. Do not publish an e
 
 `scripts/render_homebrew.py --manifest FILE --output FILE` renders the binary-only formula from the exact four-target combined manifest. It rejects unexpected targets, names, versions, duplicate targets, and malformed hashes. The formula has no `service` or installation hooks; its tests exercise version/help and offline diagnostics only.
 
+Homebrew infers the version from the archive URLs. The published v0.1.0 formula asset contains a redundant explicit version line that Homebrew audit rejects. The tap removes only that exact line for v0.1.0 and otherwise verifies the complete formula against its expected rendering; future generated formulas omit it. Published assets and hashes remain unchanged.
+
 [WhiteKiwi/homebrew-tap](https://github.com/WhiteKiwi/homebrew-tap) owns its updater and installation verification. The updater validates published assets and tests the candidate before changing its own formula using its existing ephemeral repository token. No cross-repository token is provisioned or copied from locron. The formula's livecheck is skipped because the verified updater owns its four-archive hashes. Skill integration lives separately in [WhiteKiwi/skills](https://github.com/WhiteKiwi/skills); skill publication does not install the CLI.
 
 ## Release checklist

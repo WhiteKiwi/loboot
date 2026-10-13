@@ -19,13 +19,15 @@ cargo test --locked --all-targets
 
 Ordinary tests never register, stop, start, enable or disable a real host service. The Runner fake verifies native command sequences and errors; offline CLI tests verify state. Ordinary CI runs the same safe suite on Ubuntu and macOS. The release-readiness workflow additionally opts into a guarded disposable-runner lifecycle fixture.
 
-## Opt-in isolated native validation protocol (pending)
+## Opt-in isolated native lifecycle validation
 
 `scripts/native_smoke.py` implements lifecycle-only checks for disposable GitHub-hosted runners. It requires `--allow-hosted-native`, the hosted-runner environment, a non-root account with its real HOME, and no pre-existing loboot state. It never creates a manager, changes lingering, logs out, or uses the user’s computer. Exit 77 plus JSON evidence means skipped because an existing manager/session was unavailable; it is not a pass. All created labels are unique, owned resources are cleaned up, and unrelated native files are compared before/after. macOS retains only the unique disabled-label overrides until runner disposal because launchctl has no safe per-label erase.
 
 Invocation: `python3 scripts/native_smoke.py --binary /absolute/loboot --allow-hosted-native --report /absolute/evidence.json`. The packaging workflow preserves this evidence even on failure. Read the result, checked cases, cleanup errors, and limitations before making any native support claim. The longer manual logout/login acceptance protocol below remains pending.
 
-This is a manual protocol, not an automatically executed test. Obtain authorization first; use a disposable logged-in account/session with no matching service labels. Never point it at an existing user job. Use a unique `loboot-e2e-<suffix>` ID and an absolute test executable that records invocations in an isolated directory.
+### Manual logout/login acceptance (pending)
+
+The following is a manual protocol, not an automatically executed test. Obtain authorization first; use a disposable logged-in account/session with no matching service labels. Never point it at an existing user job. Use a unique `loboot-e2e-<suffix>` ID and an absolute test executable that records invocations in an isolated directory.
 
 1. Capture initial native state and relevant paths. Add and verify zero runs and disabled persistence.
 2. Enable and verify zero immediate runs. Start once and verify exactly one invocation. Verify observed native fields without assuming long-lived running state.
@@ -45,7 +47,7 @@ Real logout/login activation evidence; automated explicit recovery; logs command
 
 Cloud Linux, Rust 1.99.0: formatting check and Clippy with warnings denied pass; 46 tests pass (37 library, 2 CLI-unit, 7 subprocess integration). These tests include both native planners through fakes and Linux/macOS offline CLI flows. A generated macOS plist also parses with Python's plistlib and preserves literal argv.
 
-An additional systemd-analyze 257 syntax-check attempt could not run because its verification setup tried to create `/run/systemd` on a read-only filesystem. It did not register or run a service. This is a blocked check, not a pass. This historical local restriction does not imply that hosted tests failed. Real native lifecycle tests remain pending; no unit, offline, packaging, or hosted compilation result establishes native login behavior.
+An additional systemd-analyze 257 syntax-check attempt could not run because its verification setup tried to create `/run/systemd` on a read-only filesystem. It did not register or run a service. This is a blocked check, not a pass. This historical local restriction does not imply that hosted tests failed. Native lifecycle tests were pending at that initial revision. The v0.1.0 hosted lifecycle results below supersede that status; no unit, offline, packaging, or hosted compilation result establishes native login behavior.
 
 ### Hosted implementation checks
 
@@ -66,7 +68,7 @@ Dependency review found MIT-compatible choices throughout the locked graph, with
 
 ### First hosted native rehearsal
 
-At PR #5 head `3fec464`, both Linux x64 and ARM64 lifecycle fixtures passed, including once/service/failure cases and cleanup ([run 38419342509](https://github.com/WhiteKiwi/loboot/actions/runs/38419342509)). Both macOS lanes exposed a real disabled-override parser incompatibility after installation. Modern launchctl reports `enabled`/`disabled`, while the original parser expected only legacy booleans; [the macOS Security Compliance Project recorded this format change](https://github.com/usnistgov/macos_security/issues/167). This failed run was rejected before publication. The parser fix must pass all native packaging lanes before release. Results are revision-specific; consult the final release workflow for exact tagged-revision evidence.
+At PR #5 head `3fec464`, both Linux x64 and ARM64 lifecycle fixtures passed, including once/service/failure cases and cleanup ([run 38419342509](https://github.com/WhiteKiwi/loboot/actions/runs/38419342509)). Both macOS lanes exposed a real disabled-override parser incompatibility after installation. Modern launchctl reports `enabled`/`disabled`, while the original parser expected only legacy booleans; [the macOS Security Compliance Project recorded this format change](https://github.com/usnistgov/macos_security/issues/167). This failed run was rejected before publication. The parser fix subsequently passed all four native packaging lanes; the final tagged-revision evidence is recorded below. Results are revision-specific; consult the final release workflow for exact tagged-revision evidence.
 
 ### Native teardown synchronization fix
 
@@ -80,3 +82,15 @@ Plan before implementation:
 4. Merge the reviewed fix only after exact-head CI/readiness, then repeat the same approved v0.1.0 release request at the new exact main commit. No existing tag or release bytes will be moved.
 
 The teardown rationale is supported by [Apple’s historical launchd source](https://github.com/apple-oss-distributions/launchd/blob/main/src/core.c), which tracks `removal_pending` for running jobs until exit. That published implementation supports investigating asynchronous removal; it is not a guarantee of current launchd internals. Current hosted-runner evidence remains the acceptance test.
+
+### Published v0.1.0 evidence
+
+[v0.1.0](https://github.com/WhiteKiwi/loboot/releases/tag/v0.1.0) was published on 2026-10-13 from `207bc318ffbcb78883d1c32f668489799060c429`, after [exact-head PR readiness](https://github.com/WhiteKiwi/loboot/actions/runs/38425247370) and [merged-main CI](https://github.com/WhiteKiwi/loboot/actions/runs/38425998074) passed.
+
+The [successful release run](https://github.com/WhiteKiwi/loboot/actions/runs/38426791733) reran the full gates and all four native lanes: Linux x64/ARM64 and macOS x64/ARM64. Each lifecycle report recorded `passed`, three delayed-exit restart cycles without overlapping previous PIDs, and an empty cleanup-error list. No native lane was skipped. These are disposable hosted-session lifecycle checks, not logout/login or boot activation evidence.
+
+The revision passed 63 Rust tests (40 library, 16 CLI unit, 7 integration), 72 Python tests, formatting, warnings-denied Clippy, and offline documentation checks. The publication job verified downloaded release bytes. An independent public download then verified all seven GitHub asset digests, archive hashes against both manifest and checksum file, all four architecture headers and exact inventories, and byte-for-byte generated-formula agreement. A copied public Linux x64 binary passed version/help and an offline JSON dry-run with isolated HOME and empty PATH.
+
+The [tap registration](https://github.com/WhiteKiwi/homebrew-tap/pull/3) merged after [exact-head Homebrew validation](https://github.com/WhiteKiwi/homebrew-tap/actions/runs/38428877889) passed on macOS ARM64 and Linux x64: native installation, bottle creation/reinstallation, strict linkage, online/new-formula audit, style, and offline formula tests. The tap also verified all four release archives and passed 27 updater tests. Its v0.1.0 formula omits only the redundant explicit version line described in [the release guide](RELEASE.md#homebrew-distribution); archive bytes and hashes are unchanged.
+
+The independent [Loboot skill release](https://github.com/WhiteKiwi/skills/releases/tag/loboot-v0.1.0) supplies portable and client-specific instructions. CLI and skill publication do not establish real user logout/login behavior or confer permission to manage a user's services. macOS downloads remain unsigned/unnotarized; Linux binaries retain the Ubuntu 24.04/glibc 2.39 baseline.
