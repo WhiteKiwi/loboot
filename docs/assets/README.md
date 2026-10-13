@@ -4,7 +4,7 @@
 
 The warm ivory, charcoal, and amber illustration shows Roki launching application windows from a laptop at login. The login/sunrise motif and separate application windows express the user-service workflow. macOS and Linux are the supported platforms; the scene does not represent machine-wide or pre-login boot services.
 
-The image is decorative; the README text and examples are the source of truth for supported behavior. This provenance note does not assign a project license. License selection remains pending.
+The image is decorative; the README text and examples are the source of truth for supported behavior. The project is licensed under MIT OR Apache-2.0; see the repository license files. This note records image provenance rather than changing those terms.
 
 ## README design references
 

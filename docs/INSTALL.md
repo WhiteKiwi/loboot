@@ -1,16 +1,41 @@
 # Installation
 
-loboot is currently **source-build only** on macOS and Linux. No crates.io release, Homebrew formula, shell installer, signed macOS download, or Windows package is offered. The repository owner has not selected a license; no license grant is implied by public access.
+loboot v0.1.0 is experimental and licensed under MIT OR Apache-2.0. Distribution uses GitHub Releases and the WhiteKiwi Homebrew tap. Until the first release assets/formula are published, use the source build below. No crates.io release, shell installer, signed/notarized macOS download, or Windows package is offered.
+
+## Homebrew
+
+```sh
+brew install WhiteKiwi/tap/loboot
+loboot --version
+loboot --help
+```
+
+Use `brew upgrade loboot` to update and `brew uninstall loboot` to remove the binary. The formula has no service stanza or installation hooks; `brew services start loboot` is not supported because loboot is not a daemon. Homebrew installation does not start or enable managed jobs.
+
+## Download a release archive
+
+Use the exact version page at [GitHub Releases](https://github.com/WhiteKiwi/loboot/releases), and download `SHA256SUMS.txt` plus the archive matching your system:
+
+| Platform | Target | Tested build baseline |
+| --- | --- | --- |
+| Linux x64 | `x86_64-unknown-linux-gnu` | Ubuntu 24.04, glibc 2.39 |
+| Linux ARM64 | `aarch64-unknown-linux-gnu` | Ubuntu 24.04, glibc 2.39 |
+| Apple Silicon | `aarch64-apple-darwin` | macOS 15 |
+| Intel Mac | `x86_64-apple-darwin` | macOS 15 |
+
+The archive name is `loboot-vVERSION-TARGET.tar.gz`. Verify its entry in the checksum file using `sha256sum` (Linux) or `shasum -a 256` (macOS) before extracting. Checksums detect altered bytes but are not an independent publisher signature. Extract into a fresh directory, inspect the included licenses, run `./loboot --version` and `./loboot --help`, then copy the binary into a directory on your PATH such as `$HOME/.local/bin`.
+
+macOS downloads are unsigned/unnotarized. If Gatekeeper blocks execution, do not bypass a security warning automatically; prefer the reviewed source build or ask your administrator. Older macOS/Linux versions and alternative libc distributions have not been established by the release matrix. Native runtime requirements still apply.
 
 ## Requirements
 
-- Rust 1.99.0 through Rustup; `rust-toolchain.toml` pins the tested toolchain and development components.
-- Git and a native compiler/linker for your platform.
+- For source builds: Rust 1.99.0 through Rustup; `rust-toolchain.toml` pins the tested toolchain and development components.
+- For source builds: Git and a native compiler/linker for your platform.
 - For real Linux operations: systemd 240+ with `systemctl` on a trusted `PATH` and a reachable user manager. Minimal containers and SSH sessions may not have one.
 - For real macOS operations: `/bin/launchctl` and the current account's graphical `gui/<uid>` session.
 - Existing absolute executable and working-directory paths without symlink components. Use physical paths such as `/private/tmp` on macOS.
 
-Offline rendering and tests do not require a live service manager. No supported architecture matrix or minimum macOS release has been established by native lifecycle acceptance yet.
+Offline rendering and tests do not require a live service manager. The binary matrix above is build/install coverage, not proof of logout/login activation.
 
 ## Install from this checkout
 

@@ -1,12 +1,12 @@
 # Contributing to loboot
 
-loboot changes real native service definitions and runtime state. Contributions should keep behavior explicit, ownership conservative, and failure evidence intact. The project is early v0.1; license selection is pending, so a public checkout does not imply a license grant.
+loboot changes real native service definitions and runtime state. Contributions should keep behavior explicit, ownership conservative, and failure evidence intact. The project is early v0.1 and dual-licensed under MIT OR Apache-2.0.
 
 ## Before changing behavior
 
 Read the [specification](docs/SPEC.md), [architecture](docs/ARCHITECTURE.md), and [CLI contract](docs/CLI.md). Explain material behavior/scope changes before implementing them and update the affected design/operator documents with the change. Small documentation corrections and behavior-preserving fixes do not need a separate planning cycle.
 
-The documentation structure and separation of verification from release readiness are informed by [locron](https://github.com/WhiteKiwi/locron). Its daemon lifecycle, release channels, license, and platform claims do not automatically apply here.
+The documentation structure and separation of verification from release readiness are informed by [locron](https://github.com/WhiteKiwi/locron). Its daemon lifecycle, credentials, and platform claims do not automatically apply here.
 
 ## Build and check
 
@@ -24,7 +24,7 @@ python3 scripts/check_docs.py
 
 Use `--offline` for Cargo when dependencies are already cached. CI also runs stable Rust tests on Linux/macOS and a pinned 1.99.0 Linux compatibility lane. [Release process](docs/RELEASE.md) describes the separate artifact rehearsal and publication gates.
 
-Ordinary tests and CI must never register, enable, start, stop, or remove a real host job. Use fake `Runner` implementations for native command sequences and `--root` sandboxes for filesystem/CLI checks. Native acceptance needs explicit authorization and an isolated disposable login account; follow [the protocol](docs/IMPLEMENTATION.md#opt-in-isolated-native-validation-protocol-pending).
+Ordinary tests and validation CI must never register, enable, start, stop, or remove a real host job. The release-readiness workflow explicitly opts into `scripts/native_smoke.py` only on disposable GitHub-hosted runners, recording passed, skipped, or failed lifecycle evidence separately. Use fake `Runner` implementations for native command sequences and `--root` sandboxes for filesystem/CLI checks. Native acceptance needs explicit authorization and an isolated disposable login account; follow [the protocol](docs/IMPLEMENTATION.md#opt-in-isolated-native-validation-protocol-pending).
 
 ## Where changes belong
 

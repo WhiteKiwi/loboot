@@ -8,6 +8,8 @@ on:
       - 'Cargo.*'
       - 'rust-toolchain.toml'
       - 'src/**'
+      - 'LICENSE*'
+      - 'CHANGELOG.md'
   workflow_dispatch:
     inputs:
       tag:
@@ -31,8 +33,12 @@ jobs:
         include:
           - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
           - os: macos-15
             target: aarch64-apple-darwin
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -54,6 +60,30 @@ jobs:
           if [ -n "$VERSION_TAG" ]; then args+=(--tag "$VERSION_TAG"); fi
           python3 scripts/release.py build --target "$TARGET" --output "dist/$TARGET" "${args[@]}"
           python3 scripts/release.py check --target "$TARGET" --input "dist/$TARGET" "${args[@]}"
+      - name: Opt-in lifecycle check on the disposable hosted runner
+        env:
+          EVIDENCE: ${{ runner.temp }}/loboot-native-evidence.json
+        run: |
+          set +e
+          python3 scripts/native_smoke.py --binary "$GITHUB_WORKSPACE/target/release/loboot" \
+            --allow-hosted-native --report "$EVIDENCE"
+          status=$?
+          set -e
+          if [ "$status" -eq 77 ]; then
+            echo '::warning::Native lifecycle skipped: existing user manager/session unavailable. Login activation remains unverified.'
+            echo 'Native lifecycle: SKIPPED (missing existing user manager/session); not a pass.' >> "$GITHUB_STEP_SUMMARY"
+          else
+            test "$status" -eq 0
+            echo 'Native lifecycle and cleanup passed. Logout/login activation remains unverified.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Preserve native lifecycle evidence, including failures and skips
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: loboot-native-evidence-${{ matrix.target }}
+          path: ${{ runner.temp }}/loboot-native-evidence.json
+          if-no-files-found: warn
+          retention-days: 14
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: loboot-dist-${{ matrix.target }}
