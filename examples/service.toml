@@ -1,0 +1,7 @@
+# Replace these absolute paths with your installed application and directory.
+id = "worker"
+executable = "/opt/my-app/bin/worker"
+args = ["--foreground"]
+cwd = "/opt/my-app"
+mode = "service"
+restart = "on-failure"
