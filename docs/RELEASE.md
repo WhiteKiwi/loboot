@@ -2,7 +2,7 @@
 
 loboot uses locron's separation of everyday checks, artifact verification, and publication as a reference. It does not inherit locron's package availability, license, signing identity, registry access, or supported platforms.
 
-**Current state:** source-build only, license undecided, Cargo `publish = false`, no public package release. A guarded manual GitHub release workflow is configured but has not been invoked. Packaging checks and uploaded Actions artifacts are not completed release/CD acceptance.
+**Current state:** source-build only, license undecided, Cargo `publish = false`, no public package release. A tag-push GitHub release workflow is configured, matching locron, but no release tag has been pushed. Packaging checks and uploaded Actions artifacts are not completed release/CD acceptance.
 
 ## 1. Validation CI
 
@@ -50,22 +50,24 @@ python3 scripts/release.py check --target x86_64-unknown-linux-gnu --input dist/
 
 On an Apple Silicon macOS host use `aarch64-apple-darwin` and a separate output directory. The selected target must match `rustc -vV`; this script does not cross-compile. Output must be absent or empty. Preserve a prior candidate rather than overwriting its evidence.
 
-The `build`, `check`, `collect`, and `gate` subcommands never publish. `gate --tag v0.1.0` currently refuses because no license has been selected; the Unreleased changelog also must become an approved versioned release entry before publication.
+The `build`, `check`, `collect`, `gate`, and `notes` subcommands never publish. `gate --tag v0.1.0` currently refuses because no license has been selected; the Unreleased changelog also must become an approved versioned release entry before publication.
 
-## 3. Guarded public GitHub release workflow
+## 3. Automatic publication from a release tag
 
-[`.github/workflows/release.yml`](../.github/workflows/release.yml) is **manual only**. It has no tag-push publication trigger and does not create a tag. An authorized release operator must dispatch it against an existing `vX.Y.Z` tag with `publish=true`.
+[`.github/workflows/release.yml`](../.github/workflows/release.yml) runs automatically when a tag matching `v*.*.*` is pushed, like [locron's release workflow](https://github.com/WhiteKiwi/locron/blob/a3f43fc15e1a5db75d811e65e35add59d51c055a/.github/workflows/release.yml). There is no manual `workflow_dispatch` or extra `publish=true` step. A main-branch merge does **not** publish a release, and the workflow does not choose a version or create a tag.
+
+Release preparation remains deliberate: the maintainer chooses the version, updates Cargo and the curated changelog, commits that revision, then pushes its annotated version tag. The tag push is the publication decision; after required checks pass, publication is automatic. Current loboot validators accept stable `vX.Y.Z` versions only. Prerelease versions, locron's signing/registry/tap channels, and its broader platform matrix are not implicitly supported.
 
 Automated prerequisites are:
 
-- Explicit `publish=true` and an existing tag ref rather than a branch.
+- A push event for a version-tag ref rather than a branch or manual dispatch.
 - The tagged commit is an ancestor of `origin/main`.
 - The exact tag matches the stable `X.Y.Z` Cargo version.
 - Cargo selects one nonempty `license` or supported `license-file` field and corresponding nonempty license text exists.
-- `CHANGELOG.md` contains a level-two entry for that exact version.
+- `CHANGELOG.md` contains exactly one nonempty level-two entry for that exact version. Its curated body becomes the GitHub release notes.
 - Both native packaging jobs, extracted-binary smoke checks, and exact inventory/checksum collection pass on the selected revision.
 
-Only the final publication job receives `contents: write`; it uses GitHub's ephemeral workflow token. It rechecks release prerequisites and artifact inventory, then creates a public GitHub release for the verified existing tag with two archives, `SHA256SUMS.txt`, and `manifest.json`. It does not publish crates, modify a Homebrew tap, install binaries, operate services, or provision signing credentials. Existing-release replacement and resumable publication are not implemented; inspect any partial publication before deciding what to do next.
+Only the final publication job receives `contents: write`; it uses GitHub's ephemeral workflow token. It rechecks release prerequisites and artifact inventory, extracts the tagged changelog notes, verifies the tag has not moved, then creates a public GitHub release for the verified existing tag with two archives, `SHA256SUMS.txt`, and `manifest.json`. It does not publish crates, modify a Homebrew tap, install binaries, operate services, or provision signing credentials. It downloads the resulting assets and verifies their hashes against the checked bundle. Existing-release replacement and resumable publication are not implemented: reruns never overwrite existing releases or assets. Inspect any partial publication before deciding what to do next, and never move or reuse a published tag.
 
 License fields are an automated presence gate, not a legal review. Native lifecycle approval and the suitability of distribution are **operator decisions**, not inferred from the packaging job.
 
@@ -77,7 +79,19 @@ The repository owner/release operator must:
 2. Complete and record [isolated native lifecycle/login acceptance](IMPLEMENTATION.md#opt-in-isolated-native-validation-protocol-pending), or explicitly decide and disclose the restricted experimental release scope. Do not label untested lifecycle behavior accepted.
 3. Approve the release version, changelog, channels, and platform claims. Keep unsupported architectures and unsigned/unnotarized status clear.
 4. Verify exact-revision CI and no-publication rehearsal evidence. Confirm archive contents, version, checksums, and extracted-binary behavior.
-5. Approve creation of the intended tag and public release separately from a PR merge. Only then select that tag and dispatch publication with the explicit flag.
+5. Approve the intended version tag and resulting public release separately from a PR merge. Only then create and push the annotated tag; that push starts automatic publication. No additional manual workflow dispatch is required.
 6. After publication, verify the release resolves to the approved tag/commit, inventory and downloaded hashes match, and an extracted download passes the safe smoke check. Do not announce distribution before this verification.
 
 No tag or public release is created by ordinary CI or by merely adding these workflows. Removing `publish = false`, adding installers/package managers, expanding platforms, or adding signing/notarization needs a separate reviewed implementation and release decision. Checksums detect corruption/changed bytes; they do not independently authenticate the publisher.
+
+### Release preparation outline
+
+After licensing, acceptance scope, exact-revision CI, and publication approval are resolved:
+
+1. Update the single package version in `Cargo.toml` and refresh `Cargo.lock`.
+2. Curate an exact `## [X.Y.Z] - YYYY-MM-DD` entry in `CHANGELOG.md`; keep Unreleased separate.
+3. Merge the reviewed version/changelog commit and run `python3 scripts/release.py gate --tag vX.Y.Z` against that exact checkout.
+4. Create the approved annotated `vX.Y.Z` tag at the reviewed commit and push that tag. This starts the release workflow automatically.
+5. Follow the run through archive checks, GitHub publication, and downloaded-asset verification. Do not move tags or replace published bytes to repair a failure; inspect evidence and use a new version when necessary.
+
+Adding or merging this configuration changes no current version and creates no tag or public release. The licensing gate remains a genuine unresolved owner decision, not a substitute manual-release button.

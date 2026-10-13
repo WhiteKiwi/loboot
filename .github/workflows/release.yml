@@ -1,14 +1,10 @@
-name: Publish approved tagged GitHub release
-# This workflow is intentionally manual. No tag creation, registry publishing,
-# installer execution, signing provisioning, or service-manager operations.
+name: Release
+# Match locron: an authorized version-tag push starts publication automatically.
+# Main-branch merges do not release, and this workflow never creates a tag.
 on:
-  workflow_dispatch:
-    inputs:
-      publish:
-        description: Publish this existing version tag publicly after all gates pass
-        type: boolean
-        required: true
-        default: false
+  push:
+    tags:
+      - 'v*.*.*'
 permissions:
   contents: read
 concurrency:
@@ -16,7 +12,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   gate:
-    name: Explicit publication, existing tag, license, and version gates
+    name: Tag push, license, changelog, and version gates
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -27,12 +23,10 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.12'
-      - name: Refuse implicit or unapproved publication
-        env:
-          APPROVED: ${{ inputs.publish }}
+      - name: Validate the pushed release tag
         run: |
-          test "$APPROVED" = true || { echo 'Explicit publish=true is required.' >&2; exit 1; }
-          test "$GITHUB_REF_TYPE" = tag || { echo 'Select an existing vX.Y.Z tag, not a branch.' >&2; exit 1; }
+          test "$GITHUB_EVENT_NAME" = push || { echo 'Release requires a tag push.' >&2; exit 1; }
+          test "$GITHUB_REF_TYPE" = tag || { echo 'Release requires a vX.Y.Z tag, not a branch.' >&2; exit 1; }
           git merge-base --is-ancestor HEAD origin/main
           python3 scripts/release.py gate --tag "$GITHUB_REF_NAME"
   readiness:
@@ -63,6 +57,7 @@ jobs:
           python3 scripts/release.py gate --tag "$GITHUB_REF_NAME"
           version="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')"
           python3 scripts/release.py collect --artifacts artifacts --out release-artifacts --version "$version"
+          python3 scripts/release.py notes --tag "$GITHUB_REF_NAME" --output release-notes.md
       - name: Publish verified assets without creating a tag
         env:
           GH_TOKEN: ${{ github.token }}
@@ -70,7 +65,7 @@ jobs:
           current_tag_sha="$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_REF_NAME" --jq .sha)"
           test "$current_tag_sha" = "$GITHUB_SHA" || { echo 'Tag moved after verification; refusing publication.' >&2; exit 1; }
           gh release create "$GITHUB_REF_NAME" --verify-tag \
-            --title "loboot $GITHUB_REF_NAME" --generate-notes \
+            --title "loboot $GITHUB_REF_NAME" --notes-file release-notes.md \
             release-artifacts/*.tar.gz release-artifacts/SHA256SUMS.txt release-artifacts/manifest.json
       - name: Verify downloaded release checksums
         env:

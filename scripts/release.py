@@ -359,15 +359,30 @@ def check(repo: Path, target: str, directory: Path, tag: str | None = None) -> d
     return verify_bundle(directory, version, target, execute=True)
 
 
+def release_notes(repo: Path, tag: str) -> str:
+    """Use one nonempty curated section from the exact tagged checkout."""
+    version = read_package(repo)["version"]
+    validate_tag(tag, version)
+    changelog = regular_file(repo / "CHANGELOG.md").decode("utf-8")
+    heading = rf"^##[ \t]+(?:\[{re.escape(version)}\]|{re.escape(version)})(?:[ \t]+[^\n]*)?$"
+    matches = list(re.finditer(heading, changelog, re.MULTILINE))
+    if len(matches) != 1:
+        raise ReleaseError(f"CHANGELOG.md must contain exactly one level-two section for {version}")
+    remaining = changelog[matches[0].end():]
+    following = re.search(r"^##[ \t]+", remaining, re.MULTILINE)
+    body = remaining[:following.start()] if following else remaining
+    body = body.strip()
+    if not body:
+        raise ReleaseError(f"CHANGELOG.md section for {version} must contain nonempty curated release notes")
+    return body + "\n"
+
+
 def gate(repo: Path, tag: str) -> dict:
     package = read_package(repo)
     version = package["version"]
     validate_tag(tag, version)
     licenses = chosen_licenses(repo, package)
-    changelog = regular_file(repo / "CHANGELOG.md").decode("utf-8")
-    heading = rf"^##[ \t]+(?:\[{re.escape(version)}\]|{re.escape(version)})(?:[ \t]+[^\n]*)?$"
-    if not re.search(heading, changelog, re.MULTILINE):
-        raise ReleaseError(f"CHANGELOG.md must contain a level-two section for {version}")
+    release_notes(repo, tag)
     # Cargo publish=false intentionally remains valid: binary releases and
     # publication to crates.io are separate decisions.
     return {"version": version, "tag": tag, "license_files": [name for name, _ in licenses], "ready": True}
@@ -414,15 +429,17 @@ def collect(repo: Path, artifacts: Path, output: Path, version: str) -> dict:
 def parser() -> argparse.ArgumentParser:
     cli = argparse.ArgumentParser(description=__doc__)
     commands = cli.add_subparsers(dest="command", required=True)
-    for command in ("build", "check", "gate", "collect"):
+    for command in ("build", "check", "gate", "notes", "collect"):
         sub = commands.add_parser(command)
         sub.add_argument("--repo", type=Path, default=Path(__file__).resolve().parent.parent)
         if command in ("build", "check"):
             sub.add_argument("--target", choices=sorted(TARGETS), required=True)
             sub.add_argument("--tag")
             sub.add_argument("--output" if command == "build" else "--input", type=Path, required=True)
-        elif command == "gate":
+        elif command in ("gate", "notes"):
             sub.add_argument("--tag", required=True)
+            if command == "notes":
+                sub.add_argument("--output", type=Path, required=True)
         else:
             sub.add_argument("--artifacts", type=Path, required=True)
             sub.add_argument("--out", type=Path, required=True)
@@ -440,6 +457,11 @@ def main(argv: list[str] | None = None) -> int:
             result = check(repo, args.target, args.input, args.tag)
         elif args.command == "gate":
             result = gate(repo, args.tag)
+        elif args.command == "notes":
+            notes = release_notes(repo, args.tag)
+            with args.output.open("x", encoding="utf-8") as destination:
+                destination.write(notes)
+            result = {"tag": args.tag, "notes": str(args.output)}
         else:
             result = collect(repo, args.artifacts, args.out, args.version)
         print(json.dumps(result, sort_keys=True))
