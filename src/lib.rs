@@ -1,5 +1,7 @@
 pub mod backend;
+pub mod logs;
 pub mod model;
+pub mod process;
 pub mod store;
 
 pub type Result<T> = std::result::Result<T, Error>;

@@ -133,7 +133,9 @@ Modes: `once` or `service`. Restart policies: `never`, `on-failure`, or `always`
 
 ¹ Enable before start/restart; stop before disabling a loaded job.
 
-**Current scope:** user-account services on macOS and Linux. Windows, system/boot scope, built-in logs, secrets, external-service adoption, and automatic recovery are deferred or out of scope. See [implementation status](docs/IMPLEMENTATION.md) for the verification boundary.
+**Unreleased source on main:** bounded `logs` and failure diagnostics are available in source builds. Published v0.1.0 binaries are unchanged and do not contain them. New macOS definitions capture stdout/stderr privately; existing definitions require an explicit stopped update. [Logging, limits and retention](docs/OPERATOR.md#logs).
+
+**Current scope:** user-account services on macOS and Linux. Windows, system/boot scope, secrets, external-service adoption, and automatic recovery are deferred or out of scope. See [implementation status](docs/IMPLEMENTATION.md) for the verification boundary.
 
 <details>
 <summary><strong>Safety and automation notes</strong></summary>

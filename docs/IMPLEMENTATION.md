@@ -33,7 +33,7 @@ The new preparation tools and their synthetic tests do not change acceptance sta
 
 ## Deferred work
 
-Real logout/login activation evidence; automated explicit recovery; logs command; richer read-only discovery; Windows/system scope. These are visible limitations rather than placeholder success responses.
+Real logout/login activation evidence; automated explicit recovery; richer read-only discovery; Windows/system scope. These are visible limitations rather than placeholder success responses.
 
 ## Recorded verification evidence
 

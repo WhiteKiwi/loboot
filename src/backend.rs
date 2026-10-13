@@ -4,11 +4,12 @@
 //! systemctl(1), launchd.plist(5), and launchctl(1). In particular, launchd
 //! bootstrap + RunAtLoad already launches a job; a second kickstart is unsafe.
 use crate::model::{Manifest, Mode, Restart};
+pub use crate::process::CaptureLimits;
 use crate::{Error, Result};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -34,17 +35,76 @@ pub struct CommandSpec {
     pub args: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct CommandOutput {
     pub success: bool,
     pub code: Option<i32>,
+    pub signal: Option<i32>,
     pub stdout: String,
     pub stderr: String,
+    pub stdout_truncated: bool,
+    pub stderr_truncated: bool,
+    pub timed_out: bool,
+    pub termination_for_limit: bool,
+    pub stdout_invalid_utf8: bool,
+    pub stderr_invalid_utf8: bool,
+}
+
+impl CommandOutput {
+    /// A successful exit alone cannot establish complete native observations.
+    pub fn is_complete(&self) -> bool {
+        !self.stdout_truncated
+            && !self.stderr_truncated
+            && !self.timed_out
+            && !self.termination_for_limit
+            && !self.stdout_invalid_utf8
+            && !self.stderr_invalid_utf8
+    }
+
+    /// Deliberately contains no arbitrary native output or command arguments.
+    pub fn failure_summary(&self) -> String {
+        let reason = if self.timed_out {
+            "native command capture timed out; outcome is uncertain"
+        } else if self.stdout_truncated || self.stderr_truncated || self.termination_for_limit {
+            "native command output exceeded its capture limit; outcome is uncertain"
+        } else if self.stdout_invalid_utf8 || self.stderr_invalid_utf8 {
+            "native command returned invalid UTF-8; outcome is uncertain"
+        } else if self.signal.is_some() {
+            "native command was terminated by a signal"
+        } else {
+            "native command failed"
+        };
+        let hint = if self.stderr.contains("Failed to connect to bus")
+            || self.stderr.contains("Could not find domain")
+        {
+            "Check the intended logged-in user session and native manager availability."
+        } else if self.stderr.contains("Permission denied")
+            || self.stderr.contains("Operation not permitted")
+        {
+            "Check ownership and permissions in the intended user session."
+        } else if self.stderr.contains("No such file or directory") {
+            "Check the configured executable and definition paths."
+        } else {
+            "Inspect native status and bounded logs before retrying."
+        };
+        format!(
+            "{reason} (exit {:?}, signal {:?}). {hint}",
+            self.code, self.signal
+        )
+    }
 }
 
 /// Both reads and mutations are explicit argv invocations. No shell is involved.
 pub trait Runner {
     fn run(&mut self, command: &CommandSpec) -> Result<CommandOutput>;
+
+    fn run_with_limits(
+        &mut self,
+        command: &CommandSpec,
+        _limits: CaptureLimits,
+    ) -> Result<CommandOutput> {
+        self.run(command)
+    }
 }
 
 #[derive(Debug, Default)]
@@ -52,21 +112,40 @@ pub struct ProcessRunner;
 
 impl Runner for ProcessRunner {
     fn run(&mut self, command: &CommandSpec) -> Result<CommandOutput> {
-        let output = Command::new(&command.program)
-            .args(&command.args)
-            .env("LC_ALL", "C")
-            .stdin(Stdio::null())
-            .output()
-            .map_err(|e| Error::new("native_command", format!("{}: {e}", command.program)))?;
+        self.run_with_limits(command, CaptureLimits::default())
+    }
+
+    fn run_with_limits(
+        &mut self,
+        command: &CommandSpec,
+        limits: CaptureLimits,
+    ) -> Result<CommandOutput> {
+        let output = crate::process::capture(
+            Command::new(&command.program).args(&command.args).env("LC_ALL", "C"),
+            limits,
+        ).map_err(|e| Error::new("native_command", format!("native helper could not be captured ({:?}); inspect native status before retrying", e.kind())))?;
+        let stdout_invalid_utf8 = std::str::from_utf8(&output.stdout).is_err();
+        let stderr_invalid_utf8 = std::str::from_utf8(&output.stderr).is_err();
         Ok(CommandOutput {
-            success: output.status.success(),
-            code: output.status.code(),
-            stdout: String::from_utf8(output.stdout)
-                .map_err(|_| Error::new("native_output", "native stdout was not UTF-8"))?,
-            stderr: String::from_utf8(output.stderr)
-                .map_err(|_| Error::new("native_output", "native stderr was not UTF-8"))?,
+            success: output.success,
+            code: output.code,
+            signal: output.signal,
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            stdout_truncated: output.stdout_truncated,
+            stderr_truncated: output.stderr_truncated,
+            timed_out: output.timed_out,
+            termination_for_limit: output.termination_for_limit,
+            stdout_invalid_utf8,
+            stderr_invalid_utf8,
         })
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Diagnostic {
+    pub code: &'static str,
+    pub message: &'static str,
 }
 
 /// Read-only process observations and pacing, injectable for deterministic tests.
@@ -259,6 +338,157 @@ impl Platform {
                 ))
             }
         }
+    }
+
+    /// Schema-2 rendering; the legacy renderer remains byte-for-byte stable.
+    pub fn render_with_logs(
+        &self,
+        manifest: &Manifest,
+        stdout_path: &Path,
+        stderr_path: &Path,
+    ) -> Result<String> {
+        let rendered = self.render(manifest)?;
+        if *self == Self::Linux {
+            return Ok(rendered);
+        }
+        for path in [stdout_path, stderr_path] {
+            if !path.is_absolute()
+                || path
+                    .components()
+                    .any(|part| matches!(part, std::path::Component::ParentDir))
+            {
+                return Err(Error::new(
+                    "invalid_path",
+                    "launchd log paths must be absolute without traversal",
+                ));
+            }
+        }
+        let paths = format!(
+            "  <key>StandardOutPath</key><string>{}</string>\n  <key>StandardErrorPath</key><string>{}</string>\n",
+            xml(utf8_path(stdout_path)?)?,
+            xml(utf8_path(stderr_path)?)?,
+        );
+        Ok(rendered.replacen(
+            "</dict>\n</plist>\n",
+            &format!("{paths}</dict>\n</plist>\n"),
+            1,
+        ))
+    }
+
+    /// Reverse journal entries are kept in their native order, including multiline entries.
+    pub fn journal_plan(&self, id: &str, lines: usize) -> Result<CommandSpec> {
+        validate_id(id)?;
+        if *self != Self::Linux {
+            return Err(Error::new(
+                "unsupported_capability",
+                "journal queries are Linux-only",
+            ));
+        }
+        let probe_lines = lines
+            .checked_add(1)
+            .ok_or_else(|| Error::new("invalid_limit", "log line limit is too large"))?;
+        Ok(CommandSpec {
+            program: "journalctl".into(),
+            args: vec![
+                "--user".into(),
+                format!("--unit={}", self.native_name(id)),
+                "--no-pager".into(),
+                "--quiet".into(),
+                "--output=cat".into(),
+                "--reverse".into(),
+                format!("--lines={probe_lines}"),
+            ],
+        })
+    }
+
+    /// Fixed hints interpret reported native evidence, never command acceptance.
+    pub fn diagnostics(&self, status: &Status) -> Vec<Diagnostic> {
+        let mut result = Vec::new();
+        let mut add = |code, message| result.push(Diagnostic { code, message });
+        match self {
+            Self::Linux => {
+                match status.raw.get("Result").map(String::as_str) {
+                    Some("start-limit-hit") => add(
+                        "start_limit",
+                        "The native start limit was reached. Inspect logs and fix the repeated failure before explicitly retrying.",
+                    ),
+                    Some("timeout") => add(
+                        "native_timeout",
+                        "The native manager reported a timeout. Inspect bounded logs and the service's startup or shutdown behavior.",
+                    ),
+                    Some("signal" | "core-dump") => add(
+                        "native_signal",
+                        "The native manager reported signal termination. Inspect the raw native status and bounded logs; this may describe an earlier run.",
+                    ),
+                    Some("exit-code") => add(
+                        "native_exit",
+                        "The native manager reported a nonzero exit. Inspect the exact raw exit status and bounded logs; this may describe an earlier run.",
+                    ),
+                    _ => {}
+                }
+                if status
+                    .raw
+                    .get("ExecMainCode")
+                    .and_then(|v| v.parse::<i32>().ok())
+                    == Some(1)
+                {
+                    // Upstream systemd.exec documents 200=CHDIR and 203=EXEC.
+                    // These hints are conditional: applications may use the same numbers.
+                    match status
+                        .raw
+                        .get("ExecMainStatus")
+                        .and_then(|v| v.parse::<i32>().ok())
+                    {
+                        Some(200) => add(
+                            "working_directory",
+                            "Native exit status 200 can indicate a working-directory setup failure. Check that the configured directory exists and is accessible.",
+                        ),
+                        Some(203) => add(
+                            "executable",
+                            "Native exit status 203 can indicate an execution setup failure. Check the executable, its permissions, and any script interpreter.",
+                        ),
+                        _ => {}
+                    }
+                }
+            }
+            Self::Macos => {
+                if status.state == "spawn failed" {
+                    add(
+                        "spawn_failed",
+                        "launchd reported a spawn failure. Check the executable, working directory, permissions, and bounded logs.",
+                    );
+                }
+                if status
+                    .raw
+                    .get("last exit code")
+                    .and_then(|v| launchd_exit_code(v))
+                    .is_some_and(|code| code != 0)
+                {
+                    add(
+                        "native_exit",
+                        "The most recently reported launchd exit code was nonzero. Inspect its exact raw value and bounded logs; this does not establish the current process outcome.",
+                    );
+                }
+                if status
+                    .raw
+                    .get("last terminating signal")
+                    .and_then(|v| launchd_signal_number(v))
+                    .is_some_and(|signal| signal > 0)
+                {
+                    add(
+                        "native_signal",
+                        "launchd reported a previous terminating signal. Inspect its exact raw value and bounded logs; this does not establish the current process outcome.",
+                    );
+                }
+            }
+        }
+        if status.enabled == Some(false) {
+            add(
+                "activation_disabled",
+                "Future login activation is disabled. This preference is separate from whether a process is currently running.",
+            );
+        }
+        result
     }
 
     pub fn reload_plan(&self) -> Vec<CommandSpec> {
@@ -715,38 +945,161 @@ fn xml(value: &str) -> Result<String> {
     Ok(result)
 }
 
+fn require_complete(code: &'static str, output: &CommandOutput) -> Result<()> {
+    if output.is_complete() {
+        return Ok(());
+    }
+    Err(Error::new(code, output.failure_summary()))
+}
+
 fn require_success(
     code: &'static str,
-    command: &CommandSpec,
+    _command: &CommandSpec,
     output: &CommandOutput,
 ) -> Result<()> {
+    require_complete(code, output)?;
     if output.success {
         return Ok(());
     }
-    Err(Error::new(
-        code,
-        format!(
-            "{} {:?} failed (exit {:?}): {}",
-            command.program,
-            command.args,
-            output.code,
-            output.stderr.trim()
-        ),
-    ))
+    Err(Error::new(code, output.failure_summary()))
+}
+
+// launchctl prints decorated exit/signal values, not only decimal integers.
+// Keep the exact bounded scalar in raw output; extract a number only for hints.
+// `(never exited)` is an observation of no previous exit, never exit code zero.
+fn launchd_exit_code(value: &str) -> Option<i32> {
+    if value.len() > 128 {
+        return None;
+    }
+    let number = if let Some((number, name)) = value.split_once(": ") {
+        if !name.starts_with("EX_")
+            || name.len() <= 3
+            || !name
+                .bytes()
+                .all(|byte| byte.is_ascii_uppercase() || byte == b'_')
+        {
+            return None;
+        }
+        number
+    } else {
+        value
+    };
+    if number.is_empty()
+        || !number
+            .bytes()
+            .enumerate()
+            .all(|(index, byte)| byte.is_ascii_digit() || (index == 0 && byte == b'-'))
+    {
+        return None;
+    }
+    number.parse().ok()
+}
+
+fn launchd_signal_number(value: &str) -> Option<u32> {
+    if value.len() > 128 {
+        return None;
+    }
+    let number = if let Some((name, number)) = value.split_once(": ") {
+        if name.is_empty()
+            || name.trim() != name
+            || !name.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b' ' | b'/' | b'-')
+            })
+        {
+            return None;
+        }
+        number
+    } else {
+        value
+    };
+    if number.is_empty() || !number.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    number.parse().ok()
+}
+
+// Only bounded native scalars are retained. Unrequested environment, argv,
+// arbitrary diagnostics, and unknown fields never enter user-visible raw data.
+fn insert_scalar(
+    raw: &mut BTreeMap<String, String>,
+    key: &str,
+    value: &str,
+    platform: Platform,
+) -> Result<()> {
+    let numeric = match platform {
+        Platform::Linux => matches!(key, "MainPID" | "ExecMainCode" | "ExecMainStatus"),
+        Platform::Macos => matches!(key, "pid" | "runs"),
+    };
+    let path = matches!(key, "FragmentPath" | "DropInPaths" | "path" | "program");
+    let valid = if platform == Platform::Macos && key == "last exit code" {
+        value == "(never exited)" || launchd_exit_code(value).is_some()
+    } else if platform == Platform::Macos && key == "last terminating signal" {
+        launchd_signal_number(value).is_some()
+    } else if numeric {
+        value.len() <= 20
+            && !value.is_empty()
+            && if key == "ExecMainStatus" {
+                value.parse::<i32>().is_ok()
+                    && value
+                        .bytes()
+                        .enumerate()
+                        .all(|(index, byte)| byte.is_ascii_digit() || (index == 0 && byte == b'-'))
+            } else {
+                value.parse::<u32>().is_ok() && value.bytes().all(|byte| byte.is_ascii_digit())
+            }
+    } else if path {
+        value.len() <= 4096 && !value.chars().any(char::is_control)
+    } else {
+        value.len() <= 128
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b' '))
+    };
+    if !valid {
+        return Err(Error::new(
+            "status_unavailable",
+            "native manager returned a malformed or oversized recognized status field",
+        ));
+    }
+    if raw.insert(key.to_string(), value.to_string()).is_some() {
+        return Err(Error::new(
+            "status_unavailable",
+            "native manager returned duplicate status fields",
+        ));
+    }
+    Ok(())
 }
 
 fn parse_systemd_status(command: &CommandSpec, output: &CommandOutput) -> Result<Status> {
-    let raw: BTreeMap<String, String> = output
-        .stdout
-        .lines()
-        .filter_map(|line| {
-            line.split_once('=')
-                .map(|(k, v)| (k.to_string(), v.to_string()))
-        })
-        .collect();
+    require_complete("status_unavailable", output)?;
+    let mut raw = BTreeMap::new();
+    for line in output.stdout.lines().filter(|line| !line.is_empty()) {
+        let (key, value) = line.split_once('=').ok_or_else(|| {
+            Error::new(
+                "status_unavailable",
+                "systemd returned a malformed status line",
+            )
+        })?;
+        if matches!(
+            key,
+            "LoadState"
+                | "ActiveState"
+                | "SubState"
+                | "UnitFileState"
+                | "MainPID"
+                | "ExecMainCode"
+                | "ExecMainStatus"
+                | "Result"
+                | "FragmentPath"
+                | "DropInPaths"
+        ) {
+            insert_scalar(&mut raw, key, value, Platform::Linux)?;
+        }
+    }
     let missing = raw.get("LoadState").is_some_and(|s| s == "not-found");
     if !output.success
         && !(matches!(output.code, Some(1) | Some(4))
+            && output.signal.is_none()
             && missing
             && raw.get("ActiveState").is_some_and(|s| s == "inactive"))
     {
@@ -797,11 +1150,13 @@ fn parse_launchd_status(
     command: &CommandSpec,
     output: &CommandOutput,
 ) -> Result<Status> {
+    require_complete("status_unavailable", output)?;
     if !output.success {
-        // ENOENT-like print results vary across OS releases. Only the exact
-        // missing-service diagnostic is accepted, never arbitrary nonzero exits.
+        // ENOENT-like print results vary across OS releases. Only a matching
+        // service diagnostic is accepted; arbitrary stderr is never returned.
         let missing_label = format!("Could not find service \"{label}\" in domain");
         if matches!(output.code, Some(113) | Some(3))
+            && output.signal.is_none()
             && output
                 .stderr
                 .lines()
@@ -812,23 +1167,54 @@ fn parse_launchd_status(
                 running: Some(false),
                 enabled: None,
                 state: "unloaded".into(),
-                raw: BTreeMap::from([("diagnostic".into(), output.stderr.clone())]),
+                raw: BTreeMap::from([
+                    ("diagnostic".into(), "service-not-found".into()),
+                    ("query_exit_code".into(), output.code.unwrap().to_string()),
+                ]),
             });
         }
         require_success("status_unavailable", command, output)?;
     }
     // launchctl print is diagnostic text, not a stable machine interface.
-    // Parse only recognized top-level scalar fields and preserve unknown state.
+    // Require a complete root object, and retain only recognized top-level
+    // scalar fields. Nested environment values are deliberately discarded.
     let mut raw = BTreeMap::new();
     let mut depth = 0usize;
-    for line in output.stdout.lines() {
-        let line = line.trim();
+    let mut started = false;
+    let mut closed = false;
+    for line in output
+        .stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        if closed {
+            return Err(Error::new(
+                "status_unavailable",
+                "unexpected data after launchctl status object",
+            ));
+        }
         if line == "}" || line == "};" {
-            depth = depth.saturating_sub(1);
+            if depth == 0 {
+                return Err(Error::new(
+                    "status_unavailable",
+                    "malformed launchctl status object",
+                ));
+            }
+            depth -= 1;
+            closed = depth == 0;
             continue;
         }
         if let Some((key, value)) = line.split_once(" = ") {
-            if depth == 1
+            if !started {
+                if value != "{" || !key.ends_with(&format!("/{label}")) {
+                    return Err(Error::new(
+                        "status_unavailable",
+                        "launchctl returned no matching job status object",
+                    ));
+                }
+                started = true;
+            } else if depth == 1
                 && matches!(
                     key,
                     "state"
@@ -839,17 +1225,24 @@ fn parse_launchd_status(
                         | "path"
                         | "program"
                 )
-                && raw.insert(key.to_string(), value.to_string()).is_some()
             {
-                return Err(Error::new(
-                    "status_unavailable",
-                    "launchctl returned duplicate status fields",
-                ));
+                insert_scalar(&mut raw, key, value, Platform::Macos)?;
             }
             if value == "{" {
                 depth += 1;
             }
+        } else if !started {
+            return Err(Error::new(
+                "status_unavailable",
+                "launchctl returned no recognizable job status object",
+            ));
         }
+    }
+    if !started || !closed {
+        return Err(Error::new(
+            "status_unavailable",
+            "truncated launchctl status object",
+        ));
     }
     let state = raw.get("state").cloned().ok_or_else(|| {
         Error::new(
@@ -957,7 +1350,64 @@ mod tests {
             code: Some(code),
             stdout: stdout.into(),
             stderr: stderr.into(),
+            ..Default::default()
         }
+    }
+    #[test]
+    fn incomplete_native_capture_and_unknown_fields_do_not_leak() {
+        let command = systemctl(&["show"]);
+        let mut out = output(
+            true,
+            0,
+            "LoadState=loaded\nActiveState=failed\nUnitFileState=disabled\nEnvironment=secret-token\nExecMainCode=1\nExecMainStatus=203\nResult=exit-code\n",
+            "",
+        );
+        let status = parse_systemd_status(&command, &out).unwrap();
+        assert!(!status.raw.contains_key("Environment"));
+        let hints = Platform::Linux.diagnostics(&status);
+        assert!(hints.iter().any(|hint| hint.code == "executable"));
+        out.stdout_truncated = true;
+        assert!(parse_systemd_status(&command, &out).is_err());
+        out.stdout_truncated = false;
+        out.timed_out = true;
+        assert!(parse_systemd_status(&command, &out).is_err());
+        let failed = output(false, 1, "", "password=must-not-leak Permission denied");
+        assert!(
+            !require_success("test", &command, &failed)
+                .unwrap_err()
+                .message
+                .contains("must-not-leak")
+        );
+    }
+    #[test]
+    fn duplicate_malformed_and_partial_status_objects_are_refused() {
+        let command = systemctl(&["show"]);
+        for stdout in [
+            "LoadState=loaded\nLoadState=not-found\n",
+            "MainPID=secret\n",
+            "broken line",
+        ] {
+            assert!(parse_systemd_status(&command, &output(true, 0, stdout, "")).is_err());
+        }
+        assert!(
+            parse_launchd_status(
+                "com.loboot.x",
+                &command,
+                &output(true, 0, "gui/501/com.loboot.x = {\nstate = running\n", "")
+            )
+            .is_err()
+        );
+        let status = parse_systemd_status(
+            &command,
+            &output(
+                true,
+                0,
+                "LoadState=not-found\nActiveState=inactive\nUnitFileState=\n",
+                "",
+            ),
+        )
+        .unwrap();
+        assert_eq!(status.enabled, None);
     }
     fn manifest() -> Manifest {
         Manifest {
@@ -1280,6 +1730,112 @@ mod tests {
         assert_eq!(status.loaded, Some(true));
         assert_eq!(status.running, Some(false));
         assert_eq!(status.raw["last exit code"], "0");
+    }
+    #[test]
+    fn launchd_decorated_exit_and_signal_fields_preserve_native_evidence() {
+        // Primary project observations of launchctl's native spellings:
+        // https://github.com/akitaonrails/ai-memory/blob/main/docs/macos.md
+        // https://github.com/Homebrew/brew/issues/14924
+        for (key, value, state, exit_hint, signal_hint) in [
+            ("last exit code", "(never exited)", "running", false, false),
+            ("last exit code", "0", "not running", false, false),
+            ("last exit code", "23", "not running", true, false),
+            ("last exit code", "78: EX_CONFIG", "not running", true, false),
+            ("last exit code", "75: EX_TEMPFAIL", "not running", true, false),
+            ("last terminating signal", "15", "not running", false, true),
+            (
+                "last terminating signal",
+                "Terminated: 15",
+                "not running",
+                false,
+                true,
+            ),
+            (
+                "last terminating signal",
+                "Killed: 9",
+                "not running",
+                false,
+                true,
+            ),
+            (
+                "last terminating signal",
+                "Segmentation fault: 11",
+                "not running",
+                false,
+                true,
+            ),
+            (
+                "last terminating signal",
+                "Trace/BPT trap: 5",
+                "not running",
+                false,
+                true,
+            ),
+        ] {
+            let mut runner = FakeRunner {
+                outputs: VecDeque::from([
+                    output(
+                        true,
+                        0,
+                        &format!(
+                            "gui/501/com.loboot.example = {{\nstate = {state}\npid = 42\n{key} = {value}\n}}\n"
+                        ),
+                        "",
+                    ),
+                    output(
+                        true,
+                        0,
+                        "disabled services = {\n\"com.loboot.example\" => enabled\n}\n",
+                        "",
+                    ),
+                ]),
+                ..Default::default()
+            };
+            let status = Platform::Macos
+                .status_with_context("example", 501, &mut runner)
+                .unwrap();
+            assert_eq!(status.raw[key], value);
+            assert_eq!(status.running, Some(state == "running"));
+            let hints = Platform::Macos.diagnostics(&status);
+            assert_eq!(
+                hints.iter().any(|hint| hint.code == "native_exit"),
+                exit_hint,
+                "{key} = {value}"
+            );
+            assert_eq!(
+                hints.iter().any(|hint| hint.code == "native_signal"),
+                signal_hint,
+                "{key} = {value}"
+            );
+        }
+    }
+    #[test]
+    fn launchd_decorated_status_is_still_bounded_and_validated() {
+        for (key, value) in [
+            ("last exit code", "password=private"),
+            ("last exit code", "78: private"),
+            ("last exit code", "78: EX_CONFIG extra"),
+            ("last exit code", "+23"),
+            ("last exit code", "2147483648"),
+            ("last terminating signal", "Terminated: password=private"),
+            ("last terminating signal", "Terminated: -15"),
+            ("last terminating signal", "Terminated: 15 extra"),
+            ("last terminating signal", "Terminated\u{1b}: 15"),
+        ] {
+            assert!(
+                insert_scalar(&mut BTreeMap::new(), key, value, Platform::Macos).is_err(),
+                "{key} = {value}"
+            );
+        }
+        for (key, value) in [
+            ("last exit code", format!("78: EX_{}", "X".repeat(128))),
+            (
+                "last terminating signal",
+                format!("{}: 15", "X".repeat(128)),
+            ),
+        ] {
+            assert!(insert_scalar(&mut BTreeMap::new(), key, &value, Platform::Macos).is_err());
+        }
     }
     #[test]
     fn launchd_sigtermed_preserves_unknown_running_state() {

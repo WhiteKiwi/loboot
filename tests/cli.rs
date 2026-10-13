@@ -86,12 +86,15 @@ fn offline_crud_and_all_dryruns_never_spawn_or_change_files() {
         vec!["restart", "hello", "--dry-run"],
         vec!["enable", "hello", "--dry-run"],
         vec!["disable", "hello", "--dry-run"],
+        vec!["logs", "hello", "--dry-run"],
     ] {
         let out = call(&root, &args);
         assert!(out.status.success(), "{args:?}: {}", value(&out));
         assert_eq!(snapshot(&root), before, "{args:?}");
     }
-    for command in ["start", "stop", "restart", "enable", "disable", "status"] {
+    for command in [
+        "start", "stop", "restart", "enable", "disable", "status", "logs",
+    ] {
         let out = call(&root, &[command, "hello"]);
         assert!(!out.status.success());
         assert_eq!(value(&out)["error"]["code"], "offline_only");
@@ -155,7 +158,9 @@ fn macos_dryrun_allows_conditional_disable_and_never_touches_manager() {
     let out = mac(&["add", m.to_str().unwrap()]);
     assert!(out.status.success(), "{}", value(&out));
     let before = snapshot(&root);
-    for command in ["start", "stop", "restart", "enable", "disable", "status"] {
+    for command in [
+        "start", "stop", "restart", "enable", "disable", "status", "logs",
+    ] {
         let out = mac(&[command, "hello", "--dry-run"]);
         assert!(out.status.success(), "{command}: {}", value(&out));
         assert_eq!(snapshot(&root), before);
@@ -205,4 +210,48 @@ fn json_flag_after_separator_is_not_a_global_flag() {
     assert!(!out.status.success());
     assert!(out.stdout.is_empty());
     assert!(!out.stderr.is_empty());
+}
+
+#[test]
+fn mac_logs_are_bounded_offline_and_dryrun_is_read_only() {
+    let t = TempDir::new().unwrap();
+    let base = t.path().canonicalize().unwrap();
+    let root = base.join("logs-root");
+    let m = manifest(&base);
+    let mac = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_loboot"))
+            .args(["--json", "--root"])
+            .arg(&root)
+            .args(["--platform", "macos"])
+            .args(args)
+            .env("PATH", "")
+            .output()
+            .unwrap()
+    };
+    assert!(mac(&["add", m.to_str().unwrap()]).status.success());
+    let shown = value(&mac(&["show", "hello"]));
+    let generation = shown["data"]["service"]["log_generation"].as_str().unwrap();
+    let capture = root.join("state/logs").join(format!("hello-{generation}"));
+    fs::write(capture.join("stdout.log"), "old\npassword=hidden\nlast\n").unwrap();
+    let before = snapshot(&root);
+    let dry = mac(&["logs", "hello", "--dry-run"]);
+    assert!(dry.status.success());
+    assert_eq!(snapshot(&root), before);
+    let logs = mac(&["logs", "hello", "--lines", "2", "--max-bytes", "64"]);
+    assert!(logs.status.success(), "{}", value(&logs));
+    let data = value(&logs);
+    assert_eq!(
+        data["data"]["sources"][0]["text"],
+        "password=[REDACTED]\nlast\n"
+    );
+    assert_eq!(data["data"]["sources"][1]["empty"], true);
+    assert_eq!(snapshot(&root), before);
+    let invalid = mac(&["logs", "hello", "--max-bytes", "0"]);
+    assert_eq!(value(&invalid)["error"]["code"], "invalid_log_limit");
+    assert_eq!(snapshot(&root), before);
+    fs::remove_file(capture.join("stderr.log")).unwrap();
+    assert_eq!(
+        value(&mac(&["logs", "hello"]))["data"]["sources"][1]["missing"],
+        true
+    );
 }

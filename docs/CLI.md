@@ -26,7 +26,7 @@ Run `loboot --help` or `loboot COMMAND --help` for parser syntax. Global flags m
 | `enable ID`, `disable ID` | Future user-manager/login activation preference; no implicit start/stop. |
 | `explain MANIFEST` | Validate a manifest and show the generated native definition/capabilities. |
 | `doctor` | State diagnostics and live-session availability; session query skipped offline/dry-run. |
-| `logs ID` | Explicit `unsupported_capability` error after managed-record validation. |
+| `logs ID [--lines N] [--max-bytes N]` | Bounded read-only private macOS capture or Linux user journal; 100 lines / 65536 bytes per source by default. |
 
 Every mutating command accepts dry-run. Live preconditions are listed but not evaluated; actual execution rechecks them. Plans can be conditional where native loaded state is unknown. A preview is not an atomic promise about future OS state.
 
@@ -92,3 +92,17 @@ Automation should:
 5. Inspect observed state after partial progress rather than blindly retrying starts or restarts.
 
 Common codes and recovery steps are in [troubleshooting](TROUBLESHOOTING.md). The default pretty-printed human output and error messages are not a stable parser interface.
+
+## Bounded logs and diagnostics (unreleased)
+
+`logs` validates the owned record first. Limits are 1–10000 lines and 1–1048576 bytes **per source**. macOS returns two `sources` in stdout/stderr order, tailing each file oldest-first. Linux returns one combined source using `journalctl --user --unit=... --no-pager --quiet --output=cat --reverse`; journal entries are newest-first, while multiline text within an entry keeps its order. No follow/tail daemon is started.
+
+Each source contains `source`, `stream`, `path` (null for journal), `order`, `text`, `missing`, `empty`, `truncated`, `bytes_truncated`, `lines_truncated`, `invalid_utf8`, `redacted`, `bytes_returned`, and `lines_returned`. Limits apply again after lossy UTF-8 decoding and best-effort common-token redaction. Truncation can split a line or character at the sampling boundary; invalid bytes are replaced and reported. An empty journal result does not prove the application never wrote output: permissions, retention, and native configuration can limit availability. Missing macOS capture files are reported separately from empty files. Unsafe paths fail, never masquerade as empty logs.
+
+`--root --platform macos logs` reads only sandbox files; Linux `--root logs` returns `offline_only`. Any `logs --dry-run` reports its planned source and bounds without querying a manager, reading log content, writing files, or locking. Legacy macOS schema-1 records return `log_capture_unavailable`; `stop`, then explicitly `update` the original manifest to enable capture. Unknown, zero, negative, or excessive limits are errors.
+
+`status` adds fixed `diagnostics` hints to unchanged observed native fields. Exit codes/signals may describe a previous run; neither hints nor command acceptance prove current process success. Native status retains bounded allowlisted scalar fields, not environment dumps or arbitrary stderr.
+
+All native helper invocations have a 1 MiB stdout / 64 KiB stderr capture budget and a 10-second observation deadline, plus up to 100 ms cleanup and scheduling overhead. Journal stdout uses the requested byte bound plus a probe byte. Over-limit or timed-out helpers are terminated in their own process group; managed service processes are not targeted. Incomplete state/ownership output is rejected. A mutation may already have reached the native manager before its helper fails; inspect state before retrying. These budgets are not a hard real-time guarantee.
+
+See [operator retention and privacy guidance](OPERATOR.md#logs). These additions are not present in the immutable v0.1.0 release.

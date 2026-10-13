@@ -184,7 +184,8 @@ notarization. Real login-session lifecycle acceptance remains pending.
 `--root ABSOLUTE_PATH --platform linux` (or `macos`) selects an offline sandbox;
 runtime actions are refused there. `add ... --dry-run` plans without creating
 the root. Executable and working-directory paths must be absolute, canonical,
-and non-symlinked. Arguments are literal; no shell is implied. No built-in logs,
+and non-symlinked. Arguments are literal; no shell is implied. Bounded log reads do not cap active
+log-file growth; inspect retention and privacy guidance before sharing output. No
 secrets, system/boot services, Windows support, or automatic recovery is provided.
 
 ## Source documentation
