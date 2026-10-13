@@ -28,7 +28,7 @@ Do not retry a mutating command blindly after a native failure. Some steps may a
 
 ## Native partial progress
 
-- `partial_failure` can indicate a native command failed after a completed prefix, or an interrupted filesystem commit. Read its message to identify which path applies.
+- `partial_failure` can indicate a native command failed after a completed prefix, an interrupted filesystem commit, or incomplete macOS teardown after bootout. A teardown failure can leave the old job unloaded without starting its replacement; inspect the owned native label and process state before deliberately starting again. Read the message to identify the completed prefix.
 - `native_sync_needed` means the filesystem change committed but the subsequent native reload failed. Do not assume files were rolled back. Inspect native state; the next native action retries the reload.
 - `verification_failed` means native commands were accepted but the final state query failed. Inspect the exact native job before deciding whether another start/restart is safe.
 

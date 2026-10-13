@@ -28,9 +28,11 @@ This file records user-facing changes. Versioned entries supply the curated GitH
 
 - Parse modern macOS launchctl `enabled`/`disabled` overrides as well as legacy `false`/`true`, while refusing unknown values. The first real hosted lifecycle test caught this before v0.1.0 publication.
 
+- Wait for launchd teardown after bootout before completing stop or reloading during restart; revalidate ownership/persistence and never blindly retry a bootstrap.
+
 ### Known limits
 
 - Real logout/login acceptance remains pending. Disposable hosted lifecycle checks report their own results separately from ordinary offline tests.
 - Experimental first release: lifecycle/login acceptance remains restricted to the evidence reported in CI; no real logout/login acceptance is claimed. macOS archives are unsigned/unnotarized; Linux binaries target Ubuntu 24.04/glibc 2.39 or newer.
-- No crates.io or ClawHub publication is included. Installing the binary never enables or starts a service.
+- No crates.io publication is included. Assistant skill registry distribution is managed separately in WhiteKiwi/skills. Installing the binary never enables or starts a service.
 - Built-in logs, secrets/environment configuration, automatic recovery, Windows, system/boot scope, and external-service adoption are deferred.

@@ -119,14 +119,30 @@ def existing_user_bus(env, uid):
 
 FIXTURE = '''import json, os, signal, sys, time
 log, kind, marker = sys.argv[1:]
+if kind == "service":
+    def stop(*_):
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        time.sleep(0.75)
+        sys.exit(0)
+    signal.signal(signal.SIGTERM, stop)
+previous_live_pids = []
+if os.path.exists(log):
+    with open(log, encoding="utf-8") as stream:
+        for line in stream:
+            pid = json.loads(line)["pid"]
+            try:
+                os.kill(pid, 0)
+                previous_live_pids.append(pid)
+            except ProcessLookupError:
+                pass
 with open(log, "a", encoding="utf-8") as stream:
-    stream.write(json.dumps({"pid": os.getpid(), "kind": kind, "marker": marker}) + "\\n")
+    stream.write(json.dumps({"pid": os.getpid(), "kind": kind, "marker": marker,
+                            "previous_live_pids": previous_live_pids}) + "\\n")
     stream.flush()
     os.fsync(stream.fileno())
 if kind == "fail":
     sys.exit(23)
 if kind == "service":
-    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     while True:
         signal.pause()
 '''
@@ -309,26 +325,33 @@ class NativeSmoke:
             require(self.status(service)["enabled"] is True and self.status(service)["running"] is True,
                     "loaded-disable failure changed macOS state")
             self.check("macOS loaded-disable rejected without changing runtime or preference")
-        self.cli("restart", service)
-        self.wait("one restart invocation", lambda: len(self.events(service)) == 2 and self.status(service)["running"] is True)
-        self.stable_count(service, 2)
-        self.check("service start, repeated start, and restart observed")
+        for count in range(2, 5):
+            self.cli("restart", service)
+            self.wait("one restart invocation", lambda: len(self.events(service)) == count and self.status(service)["running"] is True)
+            self.stable_count(service, count)
+            require(self.events(service)[-1].get("previous_live_pids") == [],
+                    "restart overlapped a previous fixture process")
+            require(all(not self.pid_exists(event["pid"]) for event in self.events(service)[:-1]),
+                    "restart returned with an old fixture process still alive")
+        self.evidence["service_restart_cycles"] = 3
+        self.evidence["fixture_term_delay_seconds"] = 0.75
+        self.check("three service restarts with delayed SIGTERM exit ran exactly once each without overlap")
         self.cli("stop", service)
         self.cli("stop", service)
         self.wait("service stopped", lambda: self.status(service)["running"] is False)
         self.processes_exited(service)
         require(self.status(service)["enabled"] is True, "stop changed persistence")
-        self.stable_count(service, 2)
+        self.stable_count(service, 4)
         self.check("stop and repeated stop suppressed KeepAlive/Restart without disabling")
         updated = self.manifest(service, "service", "updated")
         self.cli("update", str(updated))
-        self.stable_count(service, 2, 1)
+        self.stable_count(service, 4, 1)
         self.cli("start", service)
-        self.wait("updated service", lambda: len(self.events(service)) == 3 and self.status(service)["running"] is True)
+        self.wait("updated service", lambda: len(self.events(service)) == 5 and self.status(service)["running"] is True)
         require(self.events(service)[-1]["marker"] == "updated", "updated argv not used")
         self.check("stopped definition update did not start; later start used new argv")
         self.stop_disable(service)
-        self.stable_count(service, 3)
+        self.stable_count(service, 5)
         self.remove(service)
 
         failing = self.add("fail")

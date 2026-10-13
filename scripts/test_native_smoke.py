@@ -11,6 +11,8 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
+import time
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -98,7 +100,7 @@ class FakeSmoke(smoke.NativeSmoke):
                 kind, marker = job["manifest"]["args"][-2:]
                 path = self.sandbox / f"{id}.jsonl"
                 with path.open("a") as file:
-                    file.write(json.dumps({"pid": 987654, "kind": kind, "marker": marker}) + "\n")
+                    file.write(json.dumps({"pid": 987654, "kind": kind, "marker": marker, "previous_live_pids": []}) + "\n")
                 job["running"] = kind == "service"
                 job["loaded"] = True
                 if kind == "fail":
@@ -229,6 +231,8 @@ class NativeSmokeTests(unittest.TestCase):
         self.assertFalse(fake.native_dir.exists())
         self.assertFalse(fake.sandbox.exists())
         self.assertFalse(fake.evidence["login_activation_verified"])
+        self.assertEqual(fake.evidence["service_restart_cycles"], 3)
+        self.assertEqual(fake.evidence["fixture_term_delay_seconds"], 0.75)
         self.assertTrue(any("missing-session" in item for item in fake.evidence["checks"]))
         self.assertEqual(len(run.call_args_list), 1)
         self.assertIn("reset-failed", run.call_args.args[0])
@@ -325,6 +329,38 @@ class NativeSmokeTests(unittest.TestCase):
             fake = FakeSmoke(other)
             with patch.object(smoke.subprocess, "run", return_value=result), self.assertRaises(smoke.SmokeError):
                 smoke.NativeSmoke.command(fake, ["doctor"])
+
+    def test_owned_fixture_delays_sigterm_before_exit(self):
+        script = self.root / "fixture.py"
+        script.write_text(smoke.FIXTURE)
+        log = self.root / "fixture.jsonl"
+        child = subprocess.Popen([sys.executable, str(script), str(log), "service", "test"])
+        try:
+            deadline = time.monotonic() + 5
+            while not log.exists() or not log.read_text().endswith("\n"):
+                self.assertIsNone(child.poll())
+                self.assertLess(time.monotonic(), deadline)
+                time.sleep(0.01)
+            started = time.monotonic()
+            child.terminate()
+            self.assertEqual(child.wait(timeout=5), 0)
+            self.assertGreaterEqual(time.monotonic() - started, 0.6)
+            events = [json.loads(line) for line in log.read_text().splitlines()]
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0]["previous_live_pids"], [])
+        finally:
+            if child.poll() is None:
+                child.kill()
+                child.wait(timeout=5)
+
+    def test_owned_fixture_reports_preexisting_process_overlap(self):
+        script = self.root / "fixture.py"
+        script.write_text(smoke.FIXTURE)
+        log = self.root / "fixture.jsonl"
+        log.write_text(json.dumps({"pid": os.getpid()}) + "\n")
+        result = subprocess.run([sys.executable, str(script), str(log), "once", "test"], capture_output=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(log.read_text().splitlines()[-1])["previous_live_pids"], [os.getpid()])
 
     def test_failure_diagnostics_are_read_only_and_scoped_to_owned_labels(self):
         fake = FakeSmoke(self.root, "Darwin")

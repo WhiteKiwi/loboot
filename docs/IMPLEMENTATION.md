@@ -67,3 +67,16 @@ Dependency review found MIT-compatible choices throughout the locked graph, with
 ### First hosted native rehearsal
 
 At PR #5 head `3fec464`, both Linux x64 and ARM64 lifecycle fixtures passed, including once/service/failure cases and cleanup ([run 38419342509](https://github.com/WhiteKiwi/loboot/actions/runs/38419342509)). Both macOS lanes exposed a real disabled-override parser incompatibility after installation. Modern launchctl reports `enabled`/`disabled`, while the original parser expected only legacy booleans; [the macOS Security Compliance Project recorded this format change](https://github.com/usnistgov/macos_security/issues/167). This failed run was rejected before publication. The parser fix must pass all native packaging lanes before release. Results are revision-specific; consult the final release workflow for exact tagged-revision evidence.
+
+### Native teardown synchronization fix
+
+The first publication attempt ([run 38422058226](https://github.com/WhiteKiwi/loboot/actions/runs/38422058226), commit `78c8c7b`) was stopped before creating a tag: macOS ARM intermittently rejected bootstrap immediately after a successful bootout during restart. Cleanup completed with no errors. This is a timing-sensitive lifecycle defect, not permission to bypass acceptance.
+
+Plan before implementation:
+
+1. After successful macOS bootout, retain the mutation lock and poll read-only observations for both an unloaded owned label and disappearance of all observed previous PIDs, with two consecutive settled observations and a 100-observation budget (99 pauses of 100 ms, plus native-query time; not a hard wall-clock deadline). Verify: fake-runner tests cover delayed unload, delayed process exit, unknown state, timeout, and no follow-on bootstrap before both conditions.
+2. Revalidate stored/native ownership and enabled preference before the single restart bootstrap. Never retry bootstrap/kickstart automatically. A query/ownership/persistence change or timeout reports partial progress and refuses the next mutating command. Verify: regression tests assert exactly one bootstrap and zero bootstrap on uncertain/changed state.
+3. Apply the same settlement boundary to stop so a subsequent update/start does not race teardown. Strengthen the isolated hosted fixture with delayed graceful exit and repeated restart cycles. Verify: all four platform lanes pass lifecycle and exact cleanup, with Linux behavior unchanged.
+4. Merge the reviewed fix only after exact-head CI/readiness, then repeat the same approved v0.1.0 release request at the new exact main commit. No existing tag or release bytes will be moved.
+
+The teardown rationale is supported by [Apple’s historical launchd source](https://github.com/apple-oss-distributions/launchd/blob/main/src/core.c), which tracks `removal_pending` for running jobs until exit. That published implementation supports investigating asynchronous removal; it is not a guarantee of current launchd internals. Current hosted-runner evidence remains the acceptance test.
