@@ -499,7 +499,9 @@ impl Dir {
                 self.0.as_raw_fd(),
                 name.as_ptr(),
                 extra_flags | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK,
-                mode,
+                // C varargs promote Darwin's u16 mode_t to int. All supplied
+                // permission values also fit int on Linux (where mode_t is u32).
+                mode as libc::c_int,
             )
         };
         if fd < 0 {
