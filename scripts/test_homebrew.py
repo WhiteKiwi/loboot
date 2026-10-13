@@ -21,6 +21,18 @@ class FormulaTests(unittest.TestCase):
         self.assertNotIn('service do', formula)
         self.assertNotIn('post_install', formula)
 
+    def test_version_is_inferred_from_all_archive_urls(self):
+        for version in ("0.1.0", "1.2.3"):
+            manifest = self.fixture()
+            manifest["version"] = version
+            for item in manifest["artifacts"]:
+                item["version"] = version
+                item["archive"] = f"{archive_stem(version, item['target'])}.tar.gz"
+            with self.subTest(version=version):
+                formula = render_homebrew.render(manifest)
+                self.assertNotRegex(formula, r'(?m)^\s*version\s+"')
+                self.assertEqual(formula.count(f"/releases/download/v{version}/loboot-v{version}-"), 4)
+
     def test_refuse_missing_duplicate_extra_or_injected_metadata(self):
         for field, value in (("target", "../oops"), ("archive", "../oops"), ("version", "0.2.0"),
                              ("sha256", "x" * 64), ("schema_version", "unknown")):

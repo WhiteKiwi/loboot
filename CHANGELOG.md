@@ -4,6 +4,10 @@ This file records user-facing changes. Versioned entries supply the curated GitH
 
 ## Unreleased
 
+### Fixed
+
+- Omit redundant Homebrew version metadata; Homebrew infers the version from all four archive URLs. The v0.1.0 tap formula applies the same one-line correction without changing any published release asset.
+
 ## [0.1.0] - 2026-10-13
 
 ### Added

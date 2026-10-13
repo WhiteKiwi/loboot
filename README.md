@@ -22,13 +22,13 @@
 
 `loboot` turns a command or TOML file into an owned **launchd job** or **systemd user service**. Preview the plan, enable future activation, and control the running job explicitly. No background loboot process, database, or implicit shell evaluation.
 
-> **Early v0.1 · Experimental.** Native backends are implemented; real logout/login acceptance is still pending. Ordinary CI uses fake service managers and offline filesystems; isolated hosted lifecycle checks report their own coverage separately. MIT OR Apache-2.0 licensed. [Verification](docs/IMPLEMENTATION.md) · [Release process](docs/RELEASE.md)
+> **v0.1.0 · Experimental.** [Native archives are available](https://github.com/WhiteKiwi/loboot/releases/tag/v0.1.0). Isolated hosted lifecycle checks passed on macOS/Linux x64 and ARM64; real logout/login acceptance is still pending. Ordinary CI uses fake service managers and offline filesystems. MIT OR Apache-2.0 licensed. [Verification](docs/IMPLEMENTATION.md) · [Release process](docs/RELEASE.md)
 
 ## Quickstart
 
 ### 1. Install
 
-After the first release is published, install through [WhiteKiwi’s Homebrew tap](https://github.com/WhiteKiwi/homebrew-tap):
+Install through [WhiteKiwi’s Homebrew tap](https://github.com/WhiteKiwi/homebrew-tap):
 
 ```sh
 brew install WhiteKiwi/tap/loboot
@@ -128,6 +128,7 @@ Modes: `once` or `service`. Restart policies: `never`, `on-failure`, or `always`
 | Future activation preference | Separate from runtime | Separate from runtime¹ |
 | Offline plans · dry-run · JSON | Implemented | Implemented |
 | Read-only discovery | Configured native directory | Configured native directory |
+| Isolated hosted lifecycle (v0.1.0) | Passed: x64 / ARM64 | Passed: x64 / ARM64 |
 | Real login-session acceptance | Pending | Pending |
 
 ¹ Enable before start/restart; stop before disabling a loaded job.
@@ -161,4 +162,12 @@ Licensed under either [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at you
 
 ## Agent skills
 
-Assistant integrations are maintained separately in [WhiteKiwi/skills](https://github.com/WhiteKiwi/skills/tree/main/skills/loboot). The skill describes plans, consent boundaries, and CLI usage; it does not install the binary or grant permission to change services.
+Assistant integrations are maintained separately in [WhiteKiwi/skills](https://github.com/WhiteKiwi/skills/tree/main/skills/loboot). Install the portable skill with the supported client selected interactively:
+
+```sh
+npx skills add WhiteKiwi/skills --skill loboot
+```
+
+[Claude Code, Codex, OpenClaw, and Hermes installation](https://github.com/WhiteKiwi/skills/blob/main/INSTALL.md) · [Versioned skill artifacts](https://github.com/WhiteKiwi/skills/releases/tag/loboot-v0.1.0) · [ClawHub](https://clawhub.ai/whitekiwi/skills/loboot).
+
+The skill describes plans, consent boundaries, and CLI usage; it does not install the binary or grant permission to change services.

@@ -1,6 +1,6 @@
 # Installation
 
-loboot v0.1.0 is experimental and licensed under MIT OR Apache-2.0. Distribution uses GitHub Releases and the WhiteKiwi Homebrew tap. Until the first release assets/formula are published, use the source build below. No crates.io release, shell installer, signed/notarized macOS download, or Windows package is offered.
+loboot v0.1.0 is experimental and licensed under MIT OR Apache-2.0. Install from the [v0.1.0 GitHub Release](https://github.com/WhiteKiwi/loboot/releases/tag/v0.1.0), the [WhiteKiwi Homebrew tap](https://github.com/WhiteKiwi/homebrew-tap), or source. No crates.io release, shell installer, signed/notarized macOS download, or Windows package is offered.
 
 ## Homebrew
 
