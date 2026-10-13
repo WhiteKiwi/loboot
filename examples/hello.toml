@@ -1,0 +1,7 @@
+id = "hello"
+executable = "/usr/bin/printf"
+args = ["Hello from loboot\\n"]
+# Use the real absolute directory; on macOS /private/tmp avoids the /tmp symlink.
+cwd = "/tmp"
+mode = "once"
+restart = "never"
