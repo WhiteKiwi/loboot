@@ -391,10 +391,10 @@ impl Store {
             .flatten();
         let mut retained_logs = Vec::new();
         for record in [&journal.before, &journal.after].into_iter().flatten() {
-            if let Some(paths) = self.log_paths(record)? {
-                if !retained_logs.contains(&paths.directory) {
-                    retained_logs.push(paths.directory);
-                }
+            if let Some(paths) = self.log_paths(record)?
+                && !retained_logs.contains(&paths.directory)
+            {
+                retained_logs.push(paths.directory);
             }
         }
         let mut changes = Vec::new();
