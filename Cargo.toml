@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.99"
 description = "Explicit, native user-service management without a daemon"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/WhiteKiwi/loboot"
+readme = "README.md"
+keywords = ["launchd", "systemd", "service", "automation"]
+categories = ["command-line-utilities"]
 publish = false
 
 [dependencies]

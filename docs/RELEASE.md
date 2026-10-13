@@ -1,97 +1,90 @@
 # CI and release process
 
-loboot uses locron's separation of everyday checks, artifact verification, and publication as a reference. It does not inherit locron's package availability, license, signing identity, registry access, or supported platforms.
+loboot separates everyday checks, artifact verification, and deliberate tag-triggered publication. The owner selected MIT OR Apache-2.0 and approved the experimental v0.1.0 GitHub/Homebrew distribution. Cargo remains `publish = false`; crates.io, signing/notarization, and new account credentials are not part of this release.
 
-**Current state:** source-build only, license undecided, Cargo `publish = false`, no public package release. A tag-push GitHub release workflow is configured, matching locron, but no release tag has been pushed. Packaging checks and uploaded Actions artifacts are not completed release/CD acceptance.
+## Validation CI
 
-## 1. Validation CI
-
-[`.github/workflows/ci.yml`](../.github/workflows/ci.yml) runs on main pushes, pull requests, and manual dispatch:
+[CI](../.github/workflows/ci.yml) runs on main pushes, pull requests, and manual dispatch:
 
 - Pinned Rust 1.99.0 formatting and warnings-denied Clippy.
-- Python release-script tests and offline documentation-link/CLI-coverage checks.
+- Python packaging/formula tests and offline documentation-link/CLI-coverage checks.
 - Rust 1.99.0 tests on Linux, plus stable Rust tests on Linux and macOS.
-- Release-profile compilation and binary `--version`/`--help` smoke checks.
+- Release-profile compilation and binary version/help smoke checks.
 
-Actions are revision-pinned, checkout credentials are not persisted, permissions default to read-only, and jobs have timeouts. No check registers or changes a real native service. Review checks for the **exact commit**, not only a badge or a previous revision. See [verification evidence](IMPLEMENTATION.md).
+Actions are revision-pinned, checkout credentials are not persisted, permissions default to read-only, and jobs have timeouts. Ordinary tests never operate native services. Review checks for the exact commit, not only a badge or a previous revision.
 
-## 2. No-publication packaging rehearsal
+## No-publication packaging rehearsal
 
-[`.github/workflows/release-readiness.yml`](../.github/workflows/release-readiness.yml) runs for relevant pull-request changes, by manual dispatch, and as a reusable workflow. A supplied `tag` is only a version-consistency check; this workflow never creates tags or releases.
+[Release readiness](../.github/workflows/release-readiness.yml) runs for relevant pull-request changes, by manual dispatch, and as a reusable workflow. An optional tag is only a version-consistency check; this workflow never creates tags/releases.
 
-The current native build targets are exactly:
-
-| Runner | Artifact target |
+| Runner | Native artifact target |
 | --- | --- |
 | Ubuntu 24.04 | `x86_64-unknown-linux-gnu` |
+| Ubuntu 24.04 ARM | `aarch64-unknown-linux-gnu` |
 | macOS 15 | `aarch64-apple-darwin` |
+| macOS 15 Intel | `x86_64-apple-darwin` |
 
-This is the packaging rehearsal matrix, not a claim of fully accepted support. Intel macOS, Linux ARM, Windows, static/musl builds, and broader Linux ABI compatibility are not established here.
+Runner labels follow [GitHub's supported hosted runners](https://docs.github.com/en/actions/reference/runners/github-hosted-runners). These are tested build/install baselines, not broader lifecycle support claims. Linux builds require glibc 2.39 or newer. Windows, musl/static builds, older Linux ABIs, and older macOS systems are not established.
 
-Each target tests and builds on its native runner, then `scripts/release.py`:
+Each target tests/builds natively. `scripts/release.py` validates Cargo/binary versions, the Rust host target, and actual ELF64/Mach-O64 architecture. It creates `loboot-vVERSION-TARGET.tar.gz` containing exactly:
 
-1. Checks the Cargo/binary version, Rust host target, and actual ELF64/Mach-O64 executable architecture.
-2. Builds `loboot-vVERSION-TARGET.tar.gz` containing the executable, a compact installation README with absolute source-documentation links, and `LICENSE-STATUS.txt`. Pending licensing is stated explicitly in candidate archives.
-3. Validates the exact archive inventory, regular-file types, permissions, and normalized metadata. It extracts only the expected regular files.
-4. Runs the extracted binary's version/help checks and an offline JSON add dry-run with an empty `PATH`. The smoke check verifies no offline root was created and no native command was planned.
-5. Produces and verifies SHA-256 checksums and a `loboot.release/v1` manifest.
+- `loboot` (executable)
+- `README.md` (standalone installation guide with source links)
+- `LICENSE-STATUS.txt` (selected project license and complete texts)
+- `THIRD-PARTY-LICENSES.txt` (locked target-filtered dependency notices, including build/dev dependencies conservatively)
+- `RUST-COPYRIGHT.html` (the pinned toolchain's standard-library notice inventory)
 
-A collection job requires exactly both target archives and validates their manifests/checksums before producing a combined bundle. Actions artifacts are retained for 14 days. These are unsigned, unnotarized candidates; no signing credentials are required or provisioned for rehearsal. Deterministic archive metadata does not imply reproducible Rust binary builds.
+The script rejects missing/unknown dependency license choices instead of assuming permission. Current dependencies offer MIT, with Unicode-3.0 additionally required by unicode-ident. Upstream texts are included without replacing their copyright holders.
+
+Archives have normalized metadata and an exact regular-file inventory. Validation extracts only those files and runs the binary's version/help plus an offline JSON add dry-run with an empty PATH. The smoke confirms no root was created and no manager command was planned. This is not native lifecycle evidence or a reproducible-build claim.
+
+The collection job requires exactly all four archives and validates their manifests/checksums. It emits `manifest.json` using `loboot.release/v1` and a combined `SHA256SUMS.txt`. Actions artifacts are retained for 14 days. The [implementation notes](IMPLEMENTATION.md) distinguish isolated native checks from fake/offline tests and pending logout/login acceptance.
 
 ### Local rehearsal
 
-Use Python 3.11+ and the pinned Rust toolchain. On a matching Linux x86_64 host:
+Python 3.11+, cached locked Cargo dependencies, and the pinned Rust toolchain are required:
 
 ```sh
 cargo build --locked --release
-python3 scripts/release.py build --target x86_64-unknown-linux-gnu --output dist/linux
-python3 scripts/release.py check --target x86_64-unknown-linux-gnu --input dist/linux
+python3 scripts/release.py build --target x86_64-unknown-linux-gnu --tag v0.1.0 --output dist/linux
+python3 scripts/release.py check --target x86_64-unknown-linux-gnu --tag v0.1.0 --input dist/linux
+python3 scripts/release.py gate --tag v0.1.0
 ```
 
-On an Apple Silicon macOS host use `aarch64-apple-darwin` and a separate output directory. The selected target must match `rustc -vV`; this script does not cross-compile. Output must be absent or empty. Preserve a prior candidate rather than overwriting its evidence.
+Use the native target for the current machine; cross-linking is rejected. Outputs must be absent/empty so previous evidence is not overwritten.
 
-The `build`, `check`, `collect`, `gate`, and `notes` subcommands never publish. `gate --tag v0.1.0` currently refuses because no license has been selected; the Unreleased changelog also must become an approved versioned release entry before publication.
+## Automatic publication from an approved tag
 
-## 3. Automatic publication from a release tag
+[Release](../.github/workflows/release.yml) runs when an authorized `v*.*.*` tag is pushed. Main merges do not release. The workflow never chooses a version. An optional guarded manual entry creates the explicitly supplied tag only after all readiness checks pass.
 
-[`.github/workflows/release.yml`](../.github/workflows/release.yml) runs automatically when a tag matching `v*.*.*` is pushed, like [locron's release workflow](https://github.com/WhiteKiwi/locron/blob/a3f43fc15e1a5db75d811e65e35add59d51c055a/.github/workflows/release.yml). There is no manual `workflow_dispatch` or extra `publish=true` step. A main-branch merge does **not** publish a release, and the workflow does not choose a version or create a tag.
+The gate requires either a tag-push event or manual dispatch on main with an exact reviewed 40-character commit SHA. Both paths require a commit on main’s history, an exact stable Cargo version, chosen license texts, one nonempty versioned changelog entry, and no existing release. Manual dispatch refuses an existing tag unless `resume_existing_tag=true` is explicitly selected and that unpublished tag resolves to the exact same reviewed commit. It never moves a tag. All four native packaging lanes and collection must pass. Only the publication job receives ephemeral `contents: write`.
 
-Release preparation remains deliberate: the maintainer chooses the version, updates Cargo and the curated changelog, commits that revision, then pushes its annotated version tag. The tag push is the publication decision; after required checks pass, publication is automatic. Current loboot validators accept stable `vX.Y.Z` versions only. Prerelease versions, locron's signing/registry/tap channels, and its broader platform matrix are not implicitly supported.
+Publication revalidates the gate/inventory. Manual dispatch creates an annotated tag at the verified commit using the ephemeral repository token only after readiness, then publishes in the same run; it does not rely on a token-created tag generating another workflow. Both paths check that the tag resolves to the verified commit. It creates the release for the existing verified tag, using curated changelog notes, with seven assets: four archives, `SHA256SUMS.txt`, `manifest.json`, and generated `loboot.rb`. It then downloads every asset and compares the manifests, formula, and archive hashes. No crates, credentials, user-host installation, or service operations occur in the publication job.
 
-Automated prerequisites are:
+Existing-release replacement is intentionally not automatic. Do not publish an empty UI release as a way to create the tag: it would conflict with the guarded publisher. Never move a published tag or overwrite published bytes to fix a release. Inspect a partial publication before taking any action.
 
-- A push event for a version-tag ref rather than a branch or manual dispatch.
-- The tagged commit is an ancestor of `origin/main`.
-- The exact tag matches the stable `X.Y.Z` Cargo version.
-- Cargo selects one nonempty `license` or supported `license-file` field and corresponding nonempty license text exists.
-- `CHANGELOG.md` contains exactly one nonempty level-two entry for that exact version. Its curated body becomes the GitHub release notes.
-- Both native packaging jobs, extracted-binary smoke checks, and exact inventory/checksum collection pass on the selected revision.
+## Homebrew distribution
 
-Only the final publication job receives `contents: write`; it uses GitHub's ephemeral workflow token. It rechecks release prerequisites and artifact inventory, extracts the tagged changelog notes, verifies the tag has not moved, then creates a public GitHub release for the verified existing tag with two archives, `SHA256SUMS.txt`, and `manifest.json`. It does not publish crates, modify a Homebrew tap, install binaries, operate services, or provision signing credentials. It downloads the resulting assets and verifies their hashes against the checked bundle. Existing-release replacement and resumable publication are not implemented: reruns never overwrite existing releases or assets. Inspect any partial publication before deciding what to do next, and never move or reuse a published tag.
+`scripts/render_homebrew.py --manifest FILE --output FILE` renders the binary-only formula from the exact four-target combined manifest. It rejects unexpected targets, names, versions, duplicate targets, and malformed hashes. The formula has no `service` or installation hooks; its tests exercise version/help and offline diagnostics only.
 
-License fields are an automated presence gate, not a legal review. Native lifecycle approval and the suitability of distribution are **operator decisions**, not inferred from the packaging job.
+[WhiteKiwi/homebrew-tap](https://github.com/WhiteKiwi/homebrew-tap) owns its updater and installation verification. The updater validates published assets and tests the candidate before changing its own formula using its existing ephemeral repository token. No cross-repository token is provisioned or copied from locron. The formula's livecheck is skipped because the verified updater owns its four-archive hashes. Skill integration lives separately in [WhiteKiwi/skills](https://github.com/WhiteKiwi/skills); skill publication does not install the CLI.
 
-## 4. Before approving the first public release
+## Release checklist
 
-The repository owner/release operator must:
+1. Curate Cargo version and the matching changelog, license texts, platform limits, and dependency notices. Record native coverage honestly; real logout/login acceptance remains separate.
+2. Merge only after exact-head CI and all four packaging jobs succeed. Verify the resulting main commit's checks.
+3. Run the gate locally on the reviewed revision, then create the approved annotated tag and push only that tag:
 
-1. Choose a license and review its text/metadata. Do not copy locron's license by assumption.
-2. Complete and record [isolated native lifecycle/login acceptance](IMPLEMENTATION.md#opt-in-isolated-native-validation-protocol-pending), or explicitly decide and disclose the restricted experimental release scope. Do not label untested lifecycle behavior accepted.
-3. Approve the release version, changelog, channels, and platform claims. Keep unsupported architectures and unsigned/unnotarized status clear.
-4. Verify exact-revision CI and no-publication rehearsal evidence. Confirm archive contents, version, checksums, and extracted-binary behavior.
-5. Approve the intended version tag and resulting public release separately from a PR merge. Only then create and push the annotated tag; that push starts automatic publication. No additional manual workflow dispatch is required.
-6. After publication, verify the release resolves to the approved tag/commit, inventory and downloaded hashes match, and an extracted download passes the safe smoke check. Do not announce distribution before this verification.
+   ```sh
+   git fetch origin main
+   git tag -a v0.1.0 APPROVED_COMMIT -m 'loboot v0.1.0'
+   git push origin refs/tags/v0.1.0
+   ```
 
-No tag or public release is created by ordinary CI or by merely adding these workflows. Removing `publish = false`, adding installers/package managers, expanding platforms, or adding signing/notarization needs a separate reviewed implementation and release decision. Checksums detect corruption/changed bytes; they do not independently authenticate the publisher.
+   Replace `APPROVED_COMMIT` with the verified release commit; never tag an unreviewed working tree.
+   Alternatively, run the **Release** workflow from main with `tag=v0.1.0` and `expected_commit=APPROVED_COMMIT`. If main has changed since review, the gate refuses and requires review of the new revision. This entry needs no new token or persistent access. If tag creation succeeded but no release exists, inspect the tag and failure first. A failed-publication-job rerun reuses only the exact matching tag. Alternatively, dispatch the same reviewed commit with `resume_existing_tag=true`; all gates/readiness rerun, and any mismatched tag or existing release is refused. A partially existing release requires manual inspection of published assets; this workflow never overwrites or deletes it.
 
-### Release preparation outline
+4. Follow release to completion, verify tag/commit identity and seven public assets, download and check hashes, and safely smoke-test the extracted native binary.
+5. Verify tap installation/tests and the assistant skill's independent release/install route. Announce only verified channels, with any remaining blocker stated.
 
-After licensing, acceptance scope, exact-revision CI, and publication approval are resolved:
-
-1. Update the single package version in `Cargo.toml` and refresh `Cargo.lock`.
-2. Curate an exact `## [X.Y.Z] - YYYY-MM-DD` entry in `CHANGELOG.md`; keep Unreleased separate.
-3. Merge the reviewed version/changelog commit and run `python3 scripts/release.py gate --tag vX.Y.Z` against that exact checkout.
-4. Create the approved annotated `vX.Y.Z` tag at the reviewed commit and push that tag. This starts the release workflow automatically.
-5. Follow the run through archive checks, GitHub publication, and downloaded-asset verification. Do not move tags or replace published bytes to repair a failure; inspect evidence and use a new version when necessary.
-
-Adding or merging this configuration changes no current version and creates no tag or public release. The licensing gate remains a genuine unresolved owner decision, not a substitute manual-release button.
+macOS archives are unsigned/unnotarized. Checksums protect integrity but are not an independent publisher signature. The first release is experimental and does not claim real login/logout behavior merely because build, offline, or hosted lifecycle smoke checks pass.

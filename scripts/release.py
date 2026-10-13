@@ -26,12 +26,15 @@ import tomllib
 
 TARGETS = {
     "x86_64-unknown-linux-gnu": "linux",
+    "aarch64-unknown-linux-gnu": "linux",
+    "x86_64-apple-darwin": "macos",
     "aarch64-apple-darwin": "macos",
 }
 SCHEMA = "loboot.release/v1"
 SOURCE_REPOSITORY = "https://github.com/WhiteKiwi/loboot"
 VERSION = re.compile(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\Z")
 LICENSE_NAMES = ("LICENSE", "LICENSE-MIT", "LICENSE-APACHE")
+ARCHIVE_FILES = ("loboot", "README.md", "LICENSE-STATUS.txt", "THIRD-PARTY-LICENSES.txt", "RUST-COPYRIGHT.html")
 PENDING_LICENSE = (
     "License selection is pending. No license has been assigned to loboot.\n"
     "This archive is a release-readiness candidate, not a published release.\n"
@@ -88,6 +91,8 @@ def chosen_licenses(repo: Path, package: dict) -> list[tuple[str, bytes]]:
     names = [license_file] if license_file else [name for name in LICENSE_NAMES if (repo / name).exists()]
     if not names:
         raise ReleaseError("add a chosen LICENSE, LICENSE-MIT, or LICENSE-APACHE file before publishing")
+    if license_id == "MIT OR Apache-2.0" and not {"LICENSE-MIT", "LICENSE-APACHE"}.issubset(names):
+        raise ReleaseError("dual licensing requires both LICENSE-MIT and LICENSE-APACHE")
     result = []
     for name in names:
         content = regular_file(repo / name)
@@ -132,16 +137,16 @@ def check_version(binary: Path, version: str, **kwargs) -> None:
 def require_binary_header(header: bytes, target: str) -> None:
     """Check the actual architecture, including when Rosetta can run x86 binaries."""
     validate_target(target)
-    if target == "x86_64-unknown-linux-gnu":
+    if target.endswith("unknown-linux-gnu"):
         valid = (
             len(header) >= 64 and header[:7] == b"\x7fELF\x02\x01\x01"
             and int.from_bytes(header[16:18], "little") in (2, 3)  # executable or PIE
-            and int.from_bytes(header[18:20], "little") == 62  # EM_X86_64
+            and int.from_bytes(header[18:20], "little") == (62 if target.startswith("x86_64") else 183)  # ELF machine
         )
     else:
         valid = (
             len(header) >= 32 and header[:4] == b"\xcf\xfa\xed\xfe"  # MH_MAGIC_64
-            and int.from_bytes(header[4:8], "little") == 0x0100000C  # CPU_TYPE_ARM64
+            and int.from_bytes(header[4:8], "little") == (0x01000007 if target.startswith("x86_64") else 0x0100000C)
             and int.from_bytes(header[12:16], "little") == 2  # MH_EXECUTE
         )
     if not valid:
@@ -155,7 +160,8 @@ def package_readme(version: str, target: str, tag: str | None) -> bytes:
 
 Native user services, explicit plans, no daemon.
 
-This archive contains a native binary, this README, and LICENSE-STATUS.txt.
+This archive contains a native binary, this README, LICENSE-STATUS.txt,
+THIRD-PARTY-LICENSES.txt, and RUST-COPYRIGHT.html.
 Read LICENSE-STATUS.txt before using or redistributing it. A pending license
 means this is an unpublished readiness candidate, with no license granted.
 
@@ -238,7 +244,7 @@ def write_archive(path: Path, stem: str, contents: dict[str, bytes]) -> None:
                 directory.type = tarfile.DIRTYPE
                 directory.mode = 0o755
                 archive.addfile(directory)
-                for name in ("loboot", "README.md", "LICENSE-STATUS.txt"):
+                for name in ARCHIVE_FILES:
                     payload = contents[name]
                     member = tarfile.TarInfo(f"{stem}/{name}")
                     member.size = len(payload)
@@ -249,12 +255,11 @@ def write_archive(path: Path, stem: str, contents: dict[str, bytes]) -> None:
 def verify_archive(path: Path, version: str, target: str, *, execute: bool) -> None:
     """Inspect every member before extracting explicit regular files ourselves."""
     stem = archive_stem(version, target)
-    expected = {stem: 0o755, f"{stem}/loboot": 0o755,
-                f"{stem}/README.md": 0o644, f"{stem}/LICENSE-STATUS.txt": 0o644}
+    expected = {stem: 0o755, **{f"{stem}/{name}": (0o755 if name == "loboot" else 0o644) for name in ARCHIVE_FILES}}
     with tarfile.open(path, "r:gz") as archive:
         members = archive.getmembers()
         if len(members) != len(expected) or {m.name for m in members} != set(expected):
-            raise ReleaseError("archive inventory must contain exactly its root, loboot, README.md, and LICENSE-STATUS.txt")
+            raise ReleaseError("archive inventory must contain exactly its root and the declared binary, README, and license files")
         for member in members:
             if (member.name == stem and not member.isdir()) or (member.name != stem and not member.isreg()):
                 raise ReleaseError(f"archive links or special files are forbidden: {member.name}")
@@ -324,6 +329,43 @@ def require_empty_output(output: Path) -> None:
         raise ReleaseError(f"output must be absent or an empty directory: {output}")
 
 
+def third_party_notices(repo: Path, target: str) -> dict[str, bytes]:
+    """Include locked target dependencies and their upstream notice texts.
+
+    Includes development/build dependencies conservatively. No license is inferred
+    from a crate's name, and unknown license choices fail closed for review.
+    """
+    metadata = json.loads(run(["cargo", "metadata", "--locked", "--offline", "--format-version", "1",
+                               "--filter-platform", target], cwd=repo))
+    parts = ["Third-party components from the locked Cargo dependency graph.\n"
+             "Development/build dependencies are included conservatively.\n"
+             "MIT is selected wherever offered; Unicode-3.0 also applies to unicode-ident.\n"]
+    for package in sorted(metadata["packages"], key=lambda p: (p["name"], p["version"])):
+        if package["name"] == "loboot" and package.get("source") is None:
+            continue
+        expression = package.get("license") or ""
+        normalized = expression.replace("/", " OR ")
+        accepted = {"MIT", "MIT OR Apache-2.0", "Apache-2.0 OR MIT", "Unlicense OR MIT",
+                    "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
+                    "(MIT OR Apache-2.0) AND Unicode-3.0"}
+        if normalized not in accepted:
+            raise ReleaseError(f"review dependency license before release: {package['name']} {expression!r}")
+        root = Path(package["manifest_path"]).parent
+        notices = sorted(path for path in root.rglob("*") if path.is_file()
+                         and path.name.upper().startswith(("LICENSE", "COPYING", "NOTICE")))
+        if not notices:
+            raise ReleaseError(f"dependency has no bundled license texts: {package['name']}")
+        parts.append(f"\n{'=' * 72}\n{package['name']} {package['version']}\nLicense: {expression}\n")
+        for notice in notices:
+            parts.append(f"\n--- {notice.relative_to(root)} ---\n{regular_file(notice).decode('utf-8').rstrip()}\n")
+    sysroot = Path(run(["rustc", "--print", "sysroot"]).strip())
+    copyright_file = sysroot / "share/doc/rust/COPYRIGHT-library.html"
+    runtime = regular_file(copyright_file)
+    if not runtime.strip():
+        raise ReleaseError("Rust runtime copyright notice is empty")
+    return {"THIRD-PARTY-LICENSES.txt": "".join(parts).encode("utf-8"), "RUST-COPYRIGHT.html": runtime}
+
+
 def build(repo: Path, target: str, output: Path, tag: str | None = None) -> dict:
     package = read_package(repo)
     version = package["version"]
@@ -337,7 +379,8 @@ def build(repo: Path, target: str, output: Path, tag: str | None = None) -> dict
         raise ReleaseError("target/release/loboot must be executable")
     check_version(binary.resolve(strict=True), version)
     contents = {"loboot": payload, "README.md": package_readme(version, target, tag),
-                "LICENSE-STATUS.txt": license_status(repo, package)}
+                "LICENSE-STATUS.txt": license_status(repo, package),
+                **third_party_notices(repo, target)}
     with tempfile.TemporaryDirectory(prefix="loboot-package-") as temporary:
         staging = Path(temporary)
         archive = staging / f"{archive_stem(version, target)}.tar.gz"

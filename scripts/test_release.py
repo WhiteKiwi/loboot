@@ -44,6 +44,9 @@ class ReleaseTests(unittest.TestCase):
         header_patch = patch.object(release, "require_binary_header")
         self.header_mock = header_patch.start()
         self.addCleanup(header_patch.stop)
+        notices_patch = patch.object(release, "third_party_notices", return_value={"THIRD-PARTY-LICENSES.txt": b"Fixture notice", "RUST-COPYRIGHT.html": b"<html>Fixture runtime notice</html>"})
+        notices_patch.start()
+        self.addCleanup(notices_patch.stop)
 
     def cargo(self, extra="", version="0.1.0"):
         (self.repo / "Cargo.toml").write_text(
@@ -111,7 +114,7 @@ class ReleaseTests(unittest.TestCase):
                 release.validate_tag(tag, "0.1.0")
 
     def test_unsupported_target(self):
-        for target in ("x86_64-apple-darwin", "aarch64-unknown-linux-gnu", "../../escape"):
+        for target in ("x86_64-pc-windows-msvc", "aarch64-unknown-linux-musl", "../../escape"):
             with self.subTest(target=target), self.assertRaises(release.ReleaseError):
                 release.archive_stem("0.1.0", target)
 
@@ -149,6 +152,24 @@ class ReleaseTests(unittest.TestCase):
             invalid[offset] = value
             with self.subTest(target=target, offset=offset), self.assertRaises(release.ReleaseError):
                 self.header_validator(bytes(invalid), target)
+
+    def test_all_four_native_headers(self):
+        for target in release.TARGETS:
+            if "linux" in target:
+                header = bytearray(64)
+                header[:7] = b"\x7fELF\x02\x01\x01"
+                header[16:18] = (3).to_bytes(2, "little")
+                header[18:20] = (62 if target.startswith("x86_64") else 183).to_bytes(2, "little")
+            else:
+                header = bytearray(32)
+                header[:4] = b"\xcf\xfa\xed\xfe"
+                header[4:8] = (0x01000007 if target.startswith("x86_64") else 0x0100000C).to_bytes(4, "little")
+                header[12:16] = (2).to_bytes(4, "little")
+            self.header_validator(bytes(header), target)
+            for other in release.TARGETS:
+                if other != target:
+                    with self.subTest(target=target, other=other), self.assertRaises(release.ReleaseError):
+                        self.header_validator(bytes(header), other)
 
     def test_build_and_archive_verification_check_architecture(self):
         self.build()
@@ -221,7 +242,7 @@ class ReleaseTests(unittest.TestCase):
             release.build(self.repo, LINUX, output)
 
     def test_smoke_uses_only_offline_dryrun_for_both_platforms(self):
-        for target in (LINUX, MACOS):
+        for target in release.TARGETS:
             release.smoke(self.binary, "0.1.0", target)
 
     def test_smoke_detects_root_creation(self):
@@ -325,8 +346,13 @@ class ReleaseTests(unittest.TestCase):
     def test_publication_trigger_matches_locron_without_main_release(self):
         workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/release.yml").read_text()
         triggers = workflow.split("\non:\n", 1)[1].split("\npermissions:", 1)[0]
-        self.assertEqual(triggers, "  push:\n    tags:\n      - 'v*.*.*'")
-        self.assertNotIn("workflow_dispatch", workflow)
+        self.assertIn("  push:\n    tags:\n      - 'v*.*.*'", triggers)
+        self.assertIn("workflow_dispatch:", triggers)
+        self.assertIn("expected_commit:", triggers)
+        self.assertIn('test "$GITHUB_REF" = refs/heads/main', workflow)
+        self.assertIn('test "$actual" = "$EXPECTED_COMMIT"', workflow)
+        self.assertIn('test "$current_tag_sha" = "$RELEASE_COMMIT"', workflow)
+        self.assertIn("Create the approved annotated tag only after readiness passes", workflow)
         self.assertNotIn("inputs.publish", workflow)
         self.assertIn('--notes-file release-notes.md', workflow)
         self.assertNotIn('--generate-notes', workflow)
@@ -367,6 +393,14 @@ class ReleaseTests(unittest.TestCase):
         self.assertIn("Fixture license text.", status)
         self.assertNotIn("pending", status)
 
+    def test_dual_license_requires_both_texts(self):
+        self.cargo('license = "MIT OR Apache-2.0"\n')
+        (self.repo / "LICENSE-MIT").write_text("MIT text")
+        with self.assertRaisesRegex(release.ReleaseError, "both"):
+            release.gate(self.repo, "v0.1.0")
+        (self.repo / "LICENSE-APACHE").write_text("Apache text")
+        self.assertEqual(len(release.gate(self.repo, "v0.1.0")["license_files"]), 2)
+
     def test_gate_supports_safe_license_file(self):
         self.cargo('license-file = "LICENSE"\n')
         (self.repo / "LICENSE").write_text("Chosen license text.\n")
@@ -384,7 +418,7 @@ class ReleaseTests(unittest.TestCase):
     def downloaded(self):
         artifacts = self.root / "downloaded"
         artifacts.mkdir()
-        for target in (LINUX, MACOS):
+        for target in release.TARGETS:
             output, _ = self.build(target)
             shutil.move(str(output), artifacts / f"job-{target}")
         return artifacts
@@ -395,7 +429,7 @@ class ReleaseTests(unittest.TestCase):
             metadata = release.collect(self.repo, artifacts, self.root / "publish", "0.1.0")
         self.assertEqual([item["target"] for item in metadata["artifacts"]], sorted(release.TARGETS))
         output = self.root / "publish"
-        self.assertEqual(len(list(output.iterdir())), 4)
+        self.assertEqual(len(list(output.iterdir())), len(release.TARGETS) + 2)
         self.assertEqual(json.loads((output / "manifest.json").read_text()), metadata)
         for line in (output / "SHA256SUMS.txt").read_text().splitlines():
             expected, filename = line.split("  ")

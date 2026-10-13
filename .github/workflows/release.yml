@@ -1,20 +1,37 @@
 name: Release
-# Match locron: an authorized version-tag push starts publication automatically.
-# Main-branch merges do not release, and this workflow never creates a tag.
+# Tag pushes remain the ordinary entry point. The guarded manual entry uses only
+# this repository's ephemeral token and publishes within the same validated run.
 on:
   push:
     tags:
       - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Approved stable version tag (vX.Y.Z); must match Cargo.toml
+        type: string
+        required: true
+      expected_commit:
+        description: Exact reviewed 40-character main commit SHA
+        type: string
+        required: true
+      resume_existing_tag:
+        description: Resume an unpublished tag only if it points to this exact reviewed commit
+        type: boolean
+        default: false
 permissions:
   contents: read
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ inputs.tag || github.ref_name }}
   cancel-in-progress: false
 jobs:
   gate:
-    name: Tag push, license, changelog, and version gates
+    name: Trusted revision, license, changelog, and version gates
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    outputs:
+      tag: ${{ steps.validate.outputs.tag }}
+      commit: ${{ steps.validate.outputs.commit }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -23,27 +40,53 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.12'
-      - name: Validate the pushed release tag
+      - name: Validate the exact release request
+        id: validate
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+          EXPECTED_COMMIT: ${{ inputs.expected_commit }}
+          RESUME_EXISTING_TAG: ${{ inputs.resume_existing_tag }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          test "$GITHUB_EVENT_NAME" = push || { echo 'Release requires a tag push.' >&2; exit 1; }
-          test "$GITHUB_REF_TYPE" = tag || { echo 'Release requires a vX.Y.Z tag, not a branch.' >&2; exit 1; }
-          git merge-base --is-ancestor HEAD origin/main
-          python3 scripts/release.py gate --tag "$GITHUB_REF_NAME"
+          actual="$(git rev-parse HEAD)"
+          git merge-base --is-ancestor "$actual" origin/main
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            test "$GITHUB_REF" = refs/heads/main || { echo 'Manual releases must run from main.' >&2; exit 1; }
+            [[ "$EXPECTED_COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo 'An exact reviewed commit is required.' >&2; exit 1; }
+            test "$actual" = "$EXPECTED_COMMIT" || { echo 'Main changed; review the new commit before dispatch.' >&2; exit 1; }
+          else
+            test "$GITHUB_EVENT_NAME" = push || exit 1
+            test "$GITHUB_REF_TYPE" = tag || exit 1
+          fi
+          python3 scripts/release.py gate --tag "$RELEASE_TAG"
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ] && git show-ref --verify --quiet "refs/tags/$RELEASE_TAG"; then
+            test "$RESUME_EXISTING_TAG" = true || { echo 'Tag already exists; inspect it before explicitly resuming.' >&2; exit 1; }
+            test "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")" = "$actual" || { echo 'Existing tag points elsewhere; refusing.' >&2; exit 1; }
+          fi
+          existing="$(gh api "repos/$GITHUB_REPOSITORY/releases" --paginate --jq '.[].tag_name')"
+          if printf '%s\n' "$existing" | grep -Fxq "$RELEASE_TAG"; then
+            echo 'Release already exists; refusing replacement.' >&2; exit 1
+          fi
+          printf 'tag=%s\ncommit=%s\n' "$RELEASE_TAG" "$actual" >> "$GITHUB_OUTPUT"
   readiness:
     needs: gate
     uses: ./.github/workflows/release-readiness.yml
     with:
-      tag: ${{ github.ref_name }}
+      tag: ${{ needs.gate.outputs.tag }}
   publish:
-    name: Publish only the verified existing tag
+    name: Publish only the verified revision and archives
     needs: [gate, readiness]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: write
+    env:
+      RELEASE_TAG: ${{ needs.gate.outputs.tag }}
+      RELEASE_COMMIT: ${{ needs.gate.outputs.commit }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          ref: ${{ needs.gate.outputs.commit }}
           persist-credentials: false
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
@@ -54,25 +97,46 @@ jobs:
           path: artifacts
       - name: Revalidate exact archives and release prerequisites
         run: |
-          python3 scripts/release.py gate --tag "$GITHUB_REF_NAME"
+          test "$(git rev-parse HEAD)" = "$RELEASE_COMMIT"
+          python3 scripts/release.py gate --tag "$RELEASE_TAG"
           version="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')"
           python3 scripts/release.py collect --artifacts artifacts --out release-artifacts --version "$version"
-          python3 scripts/release.py notes --tag "$GITHUB_REF_NAME" --output release-notes.md
-      - name: Publish verified assets without creating a tag
+          python3 scripts/render_homebrew.py --manifest release-artifacts/manifest.json --output release-artifacts/loboot.rb
+          python3 scripts/release.py notes --tag "$RELEASE_TAG" --output release-notes.md
+      - name: Create the approved annotated tag only after readiness passes
+        if: github.event_name == 'workflow_dispatch'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          current_tag_sha="$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_REF_NAME" --jq .sha)"
-          test "$current_tag_sha" = "$GITHUB_SHA" || { echo 'Tag moved after verification; refusing publication.' >&2; exit 1; }
-          gh release create "$GITHUB_REF_NAME" --verify-tag \
-            --title "loboot $GITHUB_REF_NAME" --notes-file release-notes.md \
-            release-artifacts/*.tar.gz release-artifacts/SHA256SUMS.txt release-artifacts/manifest.json
+          # Failed-job reruns may encounter a tag created earlier in this exact run.
+          # Verify it without moving it; an existing release still fails below.
+          refs="$(gh api "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/$RELEASE_TAG" --jq '.[].ref')"
+          if printf '%s\n' "$refs" | grep -Fxq "refs/tags/$RELEASE_TAG"; then
+            test "$(gh api "repos/$GITHUB_REPOSITORY/commits/$RELEASE_TAG" --jq .sha)" = "$RELEASE_COMMIT"
+            exit 0
+          fi
+          tag_object="$(gh api --method POST "repos/$GITHUB_REPOSITORY/git/tags" \
+            -f tag="$RELEASE_TAG" -f message="loboot $RELEASE_TAG" \
+            -f object="$RELEASE_COMMIT" -f type=commit --jq .sha)"
+          # Creating an existing ref fails. No force updates or credential setup.
+          gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+            -f ref="refs/tags/$RELEASE_TAG" -f sha="$tag_object"
+      - name: Publish verified assets for the unchanged tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          current_tag_sha="$(gh api "repos/$GITHUB_REPOSITORY/commits/$RELEASE_TAG" --jq .sha)"
+          test "$current_tag_sha" = "$RELEASE_COMMIT" || { echo 'Tag moved after verification; refusing publication.' >&2; exit 1; }
+          gh release create "$RELEASE_TAG" --verify-tag \
+            --title "loboot $RELEASE_TAG" --notes-file release-notes.md \
+            release-artifacts/*.tar.gz release-artifacts/SHA256SUMS.txt release-artifacts/manifest.json release-artifacts/loboot.rb
       - name: Verify downloaded release checksums
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release download "$GITHUB_REF_NAME" --dir verified-download \
-            --pattern '*.tar.gz' --pattern SHA256SUMS.txt --pattern manifest.json
+          gh release download "$RELEASE_TAG" --dir verified-download \
+            --pattern '*.tar.gz' --pattern SHA256SUMS.txt --pattern manifest.json --pattern loboot.rb
+          diff -u release-artifacts/loboot.rb verified-download/loboot.rb
           diff -u release-artifacts/manifest.json verified-download/manifest.json
           diff -u release-artifacts/SHA256SUMS.txt verified-download/SHA256SUMS.txt
           cd verified-download

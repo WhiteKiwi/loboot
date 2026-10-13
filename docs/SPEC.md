@@ -18,4 +18,8 @@ Pure rendering, escaping, planner, ownership, interrupted-state and fake service
 
 ## Deferred
 
-Boot/system services; Windows; environment/secret features; GUI; import/adopt of foreign services; automatic repair of externally changed state. License selection awaits repository owner decision.
+Boot/system services; Windows; environment/secret features; GUI; import/adopt of foreign services; automatic repair of externally changed state.
+
+## Distribution scope
+
+The owner approved MIT OR Apache-2.0 licensing and an experimental v0.1.0 distribution through GitHub release archives and Homebrew, with assistant integrations maintained in WhiteKiwi/skills. Binary packaging covers macOS/Linux x64 and ARM64 only after their native build lanes pass. Signed/notarized macOS binaries, crates.io, and registry credentials are separate decisions. A binary installation must not change any service state. Real logout/login behavior is not claimed without dedicated evidence.

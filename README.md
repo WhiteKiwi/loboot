@@ -22,11 +22,22 @@
 
 `loboot` turns a command or TOML file into an owned **launchd job** or **systemd user service**. Preview the plan, enable future activation, and control the running job explicitly. No background loboot process, database, or implicit shell evaluation.
 
-> **Early v0.1 · Source builds only.** Native backends are implemented; real login-session acceptance is still pending. CI uses fake service managers and offline filesystems. The license is undecided, so public source availability does not grant a license. [Verification](docs/IMPLEMENTATION.md) · [Release gates](docs/RELEASE.md)
+> **Early v0.1 · Experimental.** Native backends are implemented; real logout/login acceptance is still pending. Ordinary CI uses fake service managers and offline filesystems; isolated hosted lifecycle checks report their own coverage separately. MIT OR Apache-2.0 licensed. [Verification](docs/IMPLEMENTATION.md) · [Release process](docs/RELEASE.md)
 
 ## Quickstart
 
-### 1. Build from source
+### 1. Install
+
+After the first release is published, install through [WhiteKiwi’s Homebrew tap](https://github.com/WhiteKiwi/homebrew-tap):
+
+```sh
+brew install WhiteKiwi/tap/loboot
+loboot --version
+```
+
+Alternatively, download the matching macOS/Linux x64 or ARM64 archive from [GitHub Releases](https://github.com/WhiteKiwi/loboot/releases) and verify its SHA-256 checksum. macOS binaries are unsigned/unnotarized; Linux binaries require glibc 2.39 or newer. [Detailed installation](docs/INSTALL.md).
+
+To build from source:
 
 Requires **Rust 1.99.0**, Git, and a native compiler/linker on macOS or Linux.
 
@@ -37,7 +48,7 @@ cargo install --path . --locked
 loboot --version
 ```
 
-Keep Cargo's bin directory on your `PATH`. Installing the binary does not register or start services. No crates.io package, Homebrew formula, or download installer is published yet. [Install, update, and uninstall →](docs/INSTALL.md)
+Keep Cargo's bin directory on your `PATH`. Installing the binary never registers or starts services. There is no crates.io package or shell installer. [Install, update, and uninstall →](docs/INSTALL.md)
 
 ### 2. Preview a service safely
 
@@ -143,3 +154,11 @@ Modes: `once` or `service`. Restart policies: `never`, `on-failure`, or `always`
 ### Looking for scheduled work?
 
 [locron](https://github.com/WhiteKiwi/locron) schedules local commands and records their execution history. loboot manages native user services and their activation. Related tools, different jobs.
+
+## License
+
+Licensed under either [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option. Binary archives also include third-party notices.
+
+## Agent skills
+
+Assistant integrations are maintained separately in [WhiteKiwi/skills](https://github.com/WhiteKiwi/skills/tree/main/skills/loboot). The skill describes plans, consent boundaries, and CLI usage; it does not install the binary or grant permission to change services.
