@@ -1,6 +1,6 @@
 # Operator guide
 
-loboot manages one account's native services. It does not require a resident loboot process, elevate privileges, or implement its own supervisor. Real host lifecycle and login acceptance are still pending; begin with an offline trial and use an isolated account for native evaluation.
+loboot manages one account's native services. It does not require a resident loboot process, elevate privileges, or implement its own supervisor. Real logout/login activation acceptance remains pending. Hosted lifecycle checks cover disposable runner accounts; begin with an offline trial and use an isolated account for native evaluation.
 
 ## Define a job
 
@@ -56,7 +56,7 @@ Platform prerequisites matter:
 
 - Linux can explicitly start a disabled service while keeping it disabled.
 - macOS requires `enable` before `start` or `restart`. A loaded job must be stopped before `disable`. These refusals prevent hidden temporary preference changes or implicit stops.
-- macOS `stop` unloads the job with `bootout`, rather than merely signaling a `KeepAlive` process that could respawn. A fresh start uses one bootstrap, avoiding an extra kickstart of a short job.
+- macOS `stop` unloads the job with `bootout`, rather than merely signaling a `KeepAlive` process that could respawn. Stop and loaded restart wait for the old label and observed process IDs to disappear. Restart then rechecks ownership and enabled preference before one bootstrap, avoiding a teardown race or an extra kickstart of a short job. A timeout/uncertain observation stops with partial-progress evidence; inspect status before deciding what to do next.
 - Linux definition/lifecycle changes include native reloads. macOS `add` records a disabled native preference before exposing a new plist.
 
 A normal lifecycle is:

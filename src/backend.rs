@@ -6,9 +6,10 @@
 use crate::model::{Manifest, Mode, Restart};
 use crate::{Error, Result};
 use serde::Serialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -65,6 +66,74 @@ impl Runner for ProcessRunner {
             stderr: String::from_utf8(output.stderr)
                 .map_err(|_| Error::new("native_output", "native stderr was not UTF-8"))?,
         })
+    }
+}
+
+/// Read-only process observations and pacing, injectable for deterministic tests.
+pub trait TeardownObserver {
+    fn process_exists(&mut self, pid: u32) -> Result<bool>;
+    fn pause(&mut self);
+}
+
+#[derive(Debug, Default)]
+pub struct ProcessObserver;
+
+impl TeardownObserver for ProcessObserver {
+    fn process_exists(&mut self, pid: u32) -> Result<bool> {
+        let pid = i32::try_from(pid)
+            .ok()
+            .filter(|pid| *pid > 0)
+            .ok_or_else(|| Error::new("status_required", "invalid observed launchd PID"))?;
+        // SAFETY: signal 0 only probes existence/permission; it sends no signal.
+        let result = unsafe { libc::kill(pid, 0) };
+        if result == 0 {
+            return Ok(true);
+        }
+        let error = std::io::Error::last_os_error();
+        match error.raw_os_error() {
+            Some(libc::ESRCH) => Ok(false),
+            // A live PID we cannot inspect is still not proof of teardown.
+            Some(libc::EPERM) => Ok(true),
+            _ => Err(Error::new(
+                "status_unavailable",
+                format!("PID existence probe: {error}"),
+            )),
+        }
+    }
+
+    fn pause(&mut self) {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+// At most 100 observation rounds and 99 pacing waits (9.9s plus query time).
+// Two consecutive settled observations avoid bootstrapping in the same turn as
+// launchd's removal acknowledgement. There is never a bootstrap retry.
+const TEARDOWN_OBSERVATIONS: usize = 100;
+
+fn observed_launchd_pid(status: &Status, after_bootout: bool) -> Result<Option<u32>> {
+    // Hosted launchd reports this exact transitional spelling while handling
+    // SIGTERM. It is not proof of a running or stopped process. Only an already
+    // accepted bootout may keep observing it, with a valid PID below.
+    let terminating = after_bootout && status.loaded == Some(true) && status.state == "SIGTERMed";
+    if status.running.is_none() && !terminating {
+        return Err(Error::new(
+            "status_required",
+            "launchd process state is unknown",
+        ));
+    }
+    match status.raw.get("pid") {
+        Some(raw) => raw
+            .parse::<u32>()
+            .ok()
+            .filter(|pid| *pid > 0 && *pid <= i32::MAX as u32)
+            .map(Some)
+            .ok_or_else(|| Error::new("status_required", "launchd returned an invalid PID")),
+        None if status.running == Some(false) => Ok(None),
+        None => Err(Error::new(
+            "status_required",
+            "launchd process state or PID is unknown",
+        )),
     }
 }
 
@@ -340,6 +409,63 @@ impl Platform {
                 }
             }
         }
+    }
+
+    /// Validate teardown observations before accepting a destructive bootout.
+    pub fn validate_bootout_observation(&self, status: &Status) -> Result<()> {
+        if *self == Self::Macos {
+            observed_launchd_pid(status, false)?;
+        }
+        Ok(())
+    }
+
+    /// A bootout acknowledgement need not mean the old process has exited.
+    /// Wait using only exact-label queries and signal-0 PID probes. Unknown
+    /// state or changed ownership never authorizes another bootstrap.
+    pub fn wait_for_bootout(
+        &self,
+        id: &str,
+        definition: &Path,
+        session: &Session,
+        before: &Status,
+        runner: &mut dyn Runner,
+        observer: &mut dyn TeardownObserver,
+    ) -> Result<Status> {
+        if *self != Self::Macos {
+            return Err(Error::new(
+                "unsupported_capability",
+                "bootout synchronization is macOS-only",
+            ));
+        }
+        let mut pids = BTreeSet::new();
+        if let Some(pid) = observed_launchd_pid(before, false)? {
+            pids.insert(pid);
+        }
+        let mut settled = false;
+        for attempt in 0..TEARDOWN_OBSERVATIONS {
+            let status = self.status(id, session, runner)?;
+            self.verify_managed_status(id, definition, &status)?;
+            if let Some(pid) = observed_launchd_pid(&status, true)? {
+                pids.insert(pid);
+            }
+            let mut process_alive = false;
+            for pid in &pids {
+                process_alive |= observer.process_exists(*pid)?;
+            }
+            let absent =
+                status.loaded == Some(false) && status.running == Some(false) && !process_alive;
+            if absent && settled {
+                return Ok(status);
+            }
+            settled = absent;
+            if attempt + 1 < TEARDOWN_OBSERVATIONS {
+                observer.pause();
+            }
+        }
+        Err(Error::new(
+            "teardown_timeout",
+            "bootout was accepted, but the job and observed prior PIDs did not settle as absent within 100 observations; no bootstrap was attempted",
+        ))
     }
 
     /// Read-only session query; no assumption that a missing bus means absent job.
@@ -1155,6 +1281,38 @@ mod tests {
         assert_eq!(status.running, Some(false));
         assert_eq!(status.raw["last exit code"], "0");
     }
+    #[test]
+    fn launchd_sigtermed_preserves_unknown_running_state() {
+        let mut runner = FakeRunner {
+            outputs: VecDeque::from([
+                output(
+                    true,
+                    0,
+                    "gui/501/com.loboot.example = {\nstate = SIGTERMed\npid = 42\n}\n",
+                    "",
+                ),
+                output(
+                    true,
+                    0,
+                    "disabled services = {\n\"com.loboot.example\" => enabled\n}\n",
+                    "",
+                ),
+            ]),
+            ..Default::default()
+        };
+        let status = Platform::Macos
+            .status_with_context("example", 501, &mut runner)
+            .unwrap();
+        assert_eq!(status.loaded, Some(true));
+        assert_eq!(status.running, None);
+        assert_eq!(status.state, "SIGTERMed");
+        assert_eq!(observed_launchd_pid(&status, true).unwrap(), Some(42));
+        assert_eq!(
+            observed_launchd_pid(&status, false).unwrap_err().code,
+            "status_required"
+        );
+    }
+
     #[test]
     fn malformed_success_is_not_trusted() {
         for platform in [Platform::Linux, Platform::Macos] {

@@ -47,7 +47,7 @@ All six fields are required: `id`, `executable`, `args`, `cwd`, `mode`, `restart
 
 Linux disabled services can be started explicitly while remaining disabled. macOS disabled services must first be enabled; start/restart otherwise returns `disabled_service`. Disable a macOS job only after it is unloaded with stop.
 
-Fresh macOS start bootstraps once; it does not bootstrap and kickstart, which could run a short once job twice. Stop bootouts rather than signals a KeepAlive job that would respawn. Restart unloads a loaded job and reloads its installed definition.
+Fresh macOS start bootstraps once; it does not bootstrap and kickstart, which could run a short once job twice. Stop bootouts rather than signals a KeepAlive job that would respawn. Stop and loaded restart use bounded read-only polling to wait for label removal and exit of observed old PIDs. Restart rechecks ownership and enabled preference before reloading its definition with a single bootstrap. The wait allows 100 observations with 99 pauses of 100 ms, plus native-query time; it is not a hard ten-second deadline. Exhausted observations or uncertainty report partial progress and never automatically retry bootstrap/kickstart.
 
 Linux activation follows the user manager's lifetime, not each shell login. macOS uses the current `gui/<uid>` session. Neither backend manages boot/system scope.
 
