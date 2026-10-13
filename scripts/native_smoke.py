@@ -17,6 +17,7 @@ import os
 from pathlib import Path
 import platform
 import pwd
+import re
 import shutil
 import signal
 import stat
@@ -141,6 +142,8 @@ with open(log, "a", encoding="utf-8") as stream:
     stream.flush()
     os.fsync(stream.fileno())
 if kind == "fail":
+    print("loboot-stdout-marker", flush=True)
+    print("loboot-stderr-marker token=fixture-sensitive", file=sys.stderr, flush=True)
     sys.exit(23)
 if kind == "service":
     while True:
@@ -159,6 +162,7 @@ class NativeSmoke:
         self.native_dir = home / (".config/systemd/user" if system == "Linux" else "Library/LaunchAgents")
         self.ids = []
         self.manifests = {}
+        self.captures = {}
         self.before = {}
         self.missing_dirs = []
         self.sandbox = None
@@ -254,6 +258,12 @@ class NativeSmoke:
         path = self.manifest(id, kind, "initial")
         self.cli("add", str(path))
         self.cli("add", str(path))
+        if self.system == "Darwin":
+            record = self.cli("show", id)["service"]
+            generation = record.get("log_generation")
+            require(record.get("schema_version") == 2 and isinstance(generation, str)
+                    and re.fullmatch(r"[0-9a-f]{32}", generation), "missing owned capture generation")
+            self.captures[id] = generation
         status = self.status(id)
         require(status["enabled"] is False and status["running"] is False,
                 "add enabled persistence or started a process")
@@ -368,6 +378,18 @@ class NativeSmoke:
                   and self.status(failing)["raw"].get(key) == "23")
         self.stable_count(failing, 1)
         self.check("failing once fixture observed native exit 23; no implicit retry")
+        def logs_ready():
+            sources = self.cli("logs", failing, "--lines", "100", "--max-bytes", "65536")["sources"]
+            content = "\n".join(source["text"] for source in sources)
+            require("fixture-sensitive" not in content, "common token was not redacted")
+            return "loboot-stdout-marker" in content and "loboot-stderr-marker" in content
+        self.wait("captured stdout/stderr markers", logs_ready)
+        bounded = self.cli("logs", failing, "--lines", "1", "--max-bytes", "16")["sources"]
+        require(all(source["bytes_returned"] <= 16 and source["lines_returned"] <= 1 for source in bounded),
+                "log response exceeded requested bounds")
+        require(any(hint["code"] == "native_exit" for hint in self.cli("status", failing)["diagnostics"]),
+                "failure status omitted its fixed native-exit hint")
+        self.check("stdout/stderr captured, common token redacted, log reads bounded, and exit diagnostics preserved")
         self.stop_disable(failing)
         self.remove(failing)
 
@@ -445,6 +467,37 @@ class NativeSmoke:
                 record["error"] = str(exc)
             self.evidence.setdefault("failure_diagnostics", []).append(record)
 
+    def cleanup_captures(self):
+        """Delete only exact, proven fixture-owned capture generations after exit."""
+        root = self.state_dir / "logs"
+        if not root.exists() and not root.is_symlink():
+            require(not self.captures, "expected fixture captures are missing")
+            return
+        def owned(path, directory=False):
+            info = path.lstat()
+            require(info.st_uid == os.getuid() and stat.S_IMODE(info.st_mode) == (0o700 if directory else 0o600)
+                    and (stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode) and info.st_nlink == 1),
+                    f"unsafe fixture log path: {path}")
+        owned(root, True)
+        expected = {f"{id}-{generation}" for id, generation in self.captures.items()}
+        require({p.name for p in root.iterdir()} == expected | {".owner"}, "unexpected retained capture generation")
+        owned(root / ".owner")
+        require((root / ".owner").read_bytes() == b"loboot.private-log-root/v1\n", "unexpected capture-root marker")
+        for id, generation in self.captures.items():
+            directory = root / f"{id}-{generation}"
+            owned(directory, True)
+            require({p.name for p in directory.iterdir()} == {".owner", "stdout.log", "stderr.log"},
+                    "unexpected fixture capture contents")
+            for name in (".owner", "stdout.log", "stderr.log"):
+                owned(directory / name)
+            require((directory / ".owner").read_text() == f"loboot.private-log-generation/v1\n{id}\n{generation}\n",
+                    "fixture generation ownership changed")
+            for name in ("stdout.log", "stderr.log", ".owner"):
+                (directory / name).unlink()
+            directory.rmdir()
+        (root / ".owner").unlink()
+        root.rmdir()
+
     def cleanup(self):
         for id in reversed(self.ids):
             try:
@@ -462,6 +515,7 @@ class NativeSmoke:
         if not self.evidence["cleanup_errors"]:
             try:
                 if self.state_dir.exists():
+                    self.cleanup_captures()
                     require(set(p.name for p in self.state_dir.iterdir()) <= {".lock"}, "unexpected owned state remains")
                     (self.state_dir / ".lock").unlink(missing_ok=True)
                 # systemctl may create an empty activation directory. Remove

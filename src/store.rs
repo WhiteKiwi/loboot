@@ -27,6 +27,8 @@ static NONCE: AtomicU64 = AtomicU64::new(0);
 #[serde(deny_unknown_fields)]
 pub struct Record {
     pub schema_version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log_generation: Option<String>,
     pub manifest: Manifest,
     pub native_name: String,
     pub native_bytes: String,
@@ -112,15 +114,48 @@ impl Store {
         }
         Ok(())
     }
-    fn expected(&self, manifest: &Manifest) -> Result<Record> {
+    /// A prospective record; does not create files or change existing records.
+    pub fn preview(&self, manifest: &Manifest) -> Result<Record> {
+        let generation = if self.platform == Platform::Macos {
+            Some(new_generation()?)
+        } else {
+            None
+        };
+        self.expected(
+            manifest,
+            if generation.is_some() { 2 } else { 1 },
+            generation.as_deref(),
+        )
+    }
+    fn expected(
+        &self,
+        manifest: &Manifest,
+        schema: u32,
+        generation: Option<&str>,
+    ) -> Result<Record> {
         manifest.validate_syntax()?;
         let native_name = self.platform.native_name(&manifest.id);
         entry_name(&native_name)?;
+        let native_bytes = match (schema, self.platform, generation) {
+            (1, _, None) => self.platform.render(manifest)?,
+            (2, Platform::Macos, Some(generation)) => {
+                let paths = self.capture_paths(&manifest.id, generation)?;
+                self.platform
+                    .render_with_logs(manifest, &paths.stdout, &paths.stderr)?
+            }
+            _ => {
+                return Err(Error::new(
+                    "invalid_state",
+                    "unsupported record schema or log generation",
+                ));
+            }
+        };
         Ok(Record {
-            schema_version: 1,
+            schema_version: schema,
+            log_generation: generation.map(str::to_owned),
             manifest: manifest.clone(),
             native_name,
-            native_bytes: self.platform.render(manifest)?,
+            native_bytes,
         })
     }
     fn record(
@@ -141,9 +176,12 @@ impl Store {
             .map_err(|e| Error::new("invalid_state", format!("{id}: {e}")))?;
         let record: Record =
             toml::from_str(text).map_err(|e| Error::new("invalid_state", format!("{id}: {e}")))?;
-        if record.schema_version != 1
-            || record.manifest.id != id
-            || self.expected(&record.manifest)? != record
+        if record.manifest.id != id
+            || self.expected(
+                &record.manifest,
+                record.schema_version,
+                record.log_generation.as_deref(),
+            )? != record
         {
             return Err(Error::new(
                 "invalid_state",
@@ -181,6 +219,10 @@ impl Store {
         };
         let mut records = Vec::new();
         for name in state.names()? {
+            if name == "logs" {
+                self.log_root(false)?;
+                continue;
+            }
             if name == ".lock" || name.starts_with(".tmp-") {
                 continue;
             }
@@ -207,17 +249,18 @@ impl Store {
         manifest.validate()?;
         let (state, native) = self.dirs()?;
         self.pending(state.as_ref())?;
-        let after = self.expected(manifest)?;
         let before = self.record(&manifest.id, state.as_ref(), native.as_ref())?;
         if let Some(before) = before {
-            if before == after {
-                return Ok(self.plan("add", Some(before), Some(after), Vec::new()));
+            if before.manifest == *manifest {
+                return Ok(self.plan("add", Some(before.clone()), Some(before), Vec::new()));
             }
             return Err(Error::new(
                 "already_managed",
                 format!("{} already exists; use update", manifest.id),
             ));
         }
+        let after = self.preview(manifest)?;
+        self.check_log_plan(None, &after)?;
         if native
             .as_ref()
             .map(|d| d.read(&after.native_name))
@@ -250,7 +293,16 @@ impl Store {
     pub fn plan_update(&self, manifest: &Manifest) -> Result<Plan> {
         manifest.validate()?;
         let before = self.read(&manifest.id)?;
-        let after = self.expected(manifest)?;
+        let after = if before.log_generation.is_some() {
+            self.expected(
+                manifest,
+                before.schema_version,
+                before.log_generation.as_deref(),
+            )?
+        } else {
+            self.preview(manifest)?
+        };
+        self.check_log_plan(Some(&before), &after)?;
         let changes = if before == after {
             vec![]
         } else {
@@ -355,6 +407,9 @@ impl Store {
             state.atomic(JOURNAL, &bytes, false)?;
             let commit = (|| -> Result<()> {
                 if let Some(after) = &plan.after {
+                    if after.log_generation != plan.before.as_ref().and_then(|r| r.log_generation.clone()) {
+                        self.initialize_logs(after)?;
+                    }
                     native.atomic(&after.native_name, after.native_bytes.as_bytes(), plan.before.is_some())?;
                     let text = toml::to_string(after).map_err(|e| Error::new("serialization", e.to_string()))?;
                     state.atomic(&format!("{}.toml", plan.id), text.as_bytes(), plan.before.is_some())?;
@@ -410,14 +465,298 @@ impl Store {
         }
         if let Some(after) = &plan.after {
             after.manifest.validate()?;
-            if self.expected(&after.manifest)? != *after {
+            if self.expected(
+                &after.manifest,
+                after.schema_version,
+                after.log_generation.as_deref(),
+            )? != *after
+            {
                 return Err(Error::new(
                     "plan_mismatch",
                     "plan does not match this backend",
                 ));
             }
+            self.check_log_plan(plan.before.as_ref(), after)?;
         }
         Ok(())
+    }
+}
+
+const LOG_ROOT_MARKER: &[u8] = b"loboot.private-log-root/v1\n";
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CapturePaths {
+    pub directory: PathBuf,
+    pub stdout: PathBuf,
+    pub stderr: PathBuf,
+}
+
+fn new_generation() -> Result<String> {
+    let mut bytes = [0u8; 16];
+    // SAFETY: getentropy writes at most the supplied 16-byte buffer, below its
+    // 256-byte API limit. Randomness names resources; it grants no authority.
+    if unsafe { libc::getentropy(bytes.as_mut_ptr().cast(), bytes.len()) } != 0 {
+        return Err(Error::new(
+            "log_initialization",
+            "cannot allocate a log generation",
+        ));
+    }
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+fn private_metadata(md: &std::fs::Metadata, directory: bool) -> Result<()> {
+    // SAFETY: geteuid is a read-only process identity query.
+    let uid = unsafe { libc::geteuid() };
+    let expected = if directory { 0o700 } else { 0o600 };
+    if md.uid() != uid
+        || md.mode() & 0o7777 != expected
+        || (directory && !md.is_dir())
+        || (!directory && (!md.is_file() || md.nlink() != 1))
+    {
+        return Err(Error::new(
+            "unsafe_log_path",
+            "log storage must be owned by the current effective UID, directories mode 0700 and regular non-hardlinked files mode 0600; no automatic permission repair",
+        ));
+    }
+    Ok(())
+}
+
+impl Dir {
+    fn private_child(&self, name: &str, create: bool, exclusive: bool) -> Result<Option<Self>> {
+        private_metadata(&self.0.metadata()?, true)?;
+        let name_c = entry_name(name)?;
+        if create {
+            let rc = unsafe { libc::mkdirat(self.0.as_raw_fd(), name_c.as_ptr(), 0o700) };
+            if rc < 0 {
+                let e = errno();
+                if exclusive || e.kind() != std::io::ErrorKind::AlreadyExists {
+                    return Err(Error::new(
+                        "log_collision",
+                        format!("cannot exclusively create private log directory: {e}"),
+                    ));
+                }
+            } else {
+                self.0.sync_all()?;
+            }
+        }
+        let fd = unsafe {
+            libc::openat(
+                self.0.as_raw_fd(),
+                name_c.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            )
+        };
+        if fd < 0 {
+            let e = errno();
+            if e.kind() == std::io::ErrorKind::NotFound {
+                return Ok(None);
+            }
+            return Err(Error::new(
+                "unsafe_log_path",
+                format!("cannot open private log directory: {e}"),
+            ));
+        }
+        let child = Self(unsafe { File::from_raw_fd(fd) });
+        private_metadata(&child.0.metadata()?, true)?;
+        Ok(Some(child))
+    }
+    fn private_file(&self, name: &str, create: bool) -> Result<Option<File>> {
+        private_metadata(&self.0.metadata()?, true)?;
+        let flags = if create {
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL
+        } else {
+            libc::O_RDONLY
+        };
+        let file = self.file(name, flags, 0o600, true)?;
+        if let Some(file) = &file {
+            private_metadata(&file.metadata()?, false)?;
+        }
+        Ok(file)
+    }
+    fn check_marker(&self, expected: &[u8]) -> Result<()> {
+        let Some(mut file) = self.private_file(".owner", false)? else {
+            return Err(Error::new(
+                "log_ownership",
+                "private log directory has no ownership marker; refusing to adopt existing files",
+            ));
+        };
+        let mut bytes = Vec::new();
+        std::io::Read::by_ref(&mut file)
+            .take(4097)
+            .read_to_end(&mut bytes)?;
+        if bytes != expected {
+            return Err(Error::new(
+                "log_ownership",
+                "private log ownership marker does not match the exact record",
+            ));
+        }
+        Ok(())
+    }
+    fn create_private(&self, name: &str, bytes: &[u8]) -> Result<()> {
+        let mut file = self
+            .private_file(name, true)?
+            .ok_or_else(|| Error::new("log_initialization", "private file could not be created"))?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        self.0.sync_all()?;
+        Ok(())
+    }
+}
+
+impl Store {
+    fn capture_paths(&self, id: &str, generation: &str) -> Result<CapturePaths> {
+        validate_id(id)?;
+        if generation.len() != 32
+            || !generation
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err(Error::new(
+                "invalid_state",
+                "log generation must be 32 lowercase hexadecimal characters",
+            ));
+        }
+        let directory = self
+            .state_dir
+            .join("logs")
+            .join(format!("{id}-{generation}"));
+        Ok(CapturePaths {
+            stdout: directory.join("stdout.log"),
+            stderr: directory.join("stderr.log"),
+            directory,
+        })
+    }
+    pub fn log_paths(&self, record: &Record) -> Result<Option<CapturePaths>> {
+        record
+            .log_generation
+            .as_deref()
+            .map(|generation| self.capture_paths(&record.manifest.id, generation))
+            .transpose()
+    }
+    fn log_marker(record: &Record) -> Vec<u8> {
+        format!(
+            "loboot.private-log-generation/v1\n{}\n{}\n",
+            record.manifest.id,
+            record.log_generation.as_deref().unwrap_or("")
+        )
+        .into_bytes()
+    }
+    fn log_root(&self, create: bool) -> Result<Option<Dir>> {
+        let Some(state) = Dir::open(&self.state_dir, create)? else {
+            return Ok(None);
+        };
+        private_metadata(&state.0.metadata()?, true)?;
+        let Some(root) = state.private_child("logs", create, false)? else {
+            return Ok(None);
+        };
+        // Empty private roots have no data to adopt. This makes interrupted
+        // mkdir-before-marker initialization retryable without changing files.
+        if root.names()?.is_empty() {
+            if create {
+                root.create_private(".owner", LOG_ROOT_MARKER)?;
+            }
+        } else {
+            root.check_marker(LOG_ROOT_MARKER)?;
+        }
+        Ok(Some(root))
+    }
+    fn capture_dir(&self, record: &Record) -> Result<Option<Dir>> {
+        let Some(paths) = self.log_paths(record)? else {
+            return Ok(None);
+        };
+        let Some(root) = self.log_root(false)? else {
+            return Ok(None);
+        };
+        let name = paths
+            .directory
+            .file_name()
+            .and_then(OsStr::to_str)
+            .expect("derived name");
+        let Some(dir) = root.private_child(name, false, false)? else {
+            return Ok(None);
+        };
+        dir.check_marker(&Self::log_marker(record))?;
+        Ok(Some(dir))
+    }
+    fn check_log_plan(&self, before: Option<&Record>, after: &Record) -> Result<()> {
+        let Some(paths) = self.log_paths(after)? else {
+            return Ok(());
+        };
+        if before.is_some_and(|before| before.log_generation == after.log_generation) {
+            return self.verify_capture(after);
+        }
+        if let Some(root) = self.log_root(false)? {
+            let name = paths
+                .directory
+                .file_name()
+                .and_then(OsStr::to_str)
+                .expect("derived name");
+            if root.private_child(name, false, false)?.is_some() {
+                return Err(Error::new(
+                    "log_collision",
+                    "new log generation already exists; no files were adopted or truncated",
+                ));
+            }
+        }
+        Ok(())
+    }
+    fn initialize_logs(&self, record: &Record) -> Result<()> {
+        let Some(paths) = self.log_paths(record)? else {
+            return Ok(());
+        };
+        let root = self.log_root(true)?.expect("created log root");
+        let name = paths
+            .directory
+            .file_name()
+            .and_then(OsStr::to_str)
+            .expect("derived name");
+        let dir = root
+            .private_child(name, true, true)?
+            .expect("created generation");
+        dir.create_private(".owner", &Self::log_marker(record))?;
+        dir.create_private("stdout.log", b"")?;
+        dir.create_private("stderr.log", b"")?;
+        Ok(())
+    }
+    /// Validate capture paths before any action that can launch a job. Never
+    /// repair, create, truncate or follow a path during a runtime operation.
+    pub fn verify_capture(&self, record: &Record) -> Result<()> {
+        if record.log_generation.is_none() {
+            return Ok(());
+        }
+        let missing = || {
+            Error::new(
+                "log_capture_missing",
+                "owned log capture is missing; restore its private files before enabling or starting the service",
+            )
+        };
+        let dir = self.capture_dir(record)?.ok_or_else(missing)?;
+        for name in ["stdout.log", "stderr.log"] {
+            dir.private_file(name, false)?.ok_or_else(missing)?;
+        }
+        Ok(())
+    }
+    pub fn read_logs(
+        &self,
+        record: &Record,
+        limits: crate::logs::LogLimits,
+    ) -> Result<Vec<crate::logs::LogSource>> {
+        let paths = self.log_paths(record)?.ok_or_else(|| Error::new("log_capture_unavailable", "legacy macOS definition has no output capture; stop/unload it and explicitly update its original manifest to opt in"))?;
+        let dir = self.capture_dir(record)?;
+        [
+            ("stdout", "stdout.log", paths.stdout),
+            ("stderr", "stderr.log", paths.stderr),
+        ]
+        .into_iter()
+        .map(|(stream, name, path)| {
+            let file = dir
+                .as_ref()
+                .map(|dir| dir.private_file(name, false))
+                .transpose()?
+                .flatten();
+            crate::logs::read_file(stream, path, file, limits)
+        })
+        .collect()
     }
 }
 
@@ -725,6 +1064,176 @@ mod tests {
                 .apply(&self.store.plan_add(&self.manifest).unwrap())
                 .unwrap();
         }
+    }
+    fn mac_fixture() -> Fixture {
+        let mut fixture = Fixture::new();
+        fixture.store.platform = Platform::Macos;
+        fixture
+    }
+    #[test]
+    fn mac_capture_is_private_bounded_and_retained_on_remove() {
+        let f = mac_fixture();
+        let plan = f.store.plan_add(&f.manifest).unwrap();
+        assert!(!f.store.state_dir.exists());
+        f.store.apply(&plan).unwrap();
+        let record = f.store.read(&f.manifest.id).unwrap();
+        assert_eq!(record.schema_version, 2);
+        let paths = f.store.log_paths(&record).unwrap().unwrap();
+        for path in [&paths.stdout, &paths.stderr] {
+            assert_eq!(fs::metadata(path).unwrap().mode() & 0o777, 0o600);
+        }
+        assert_eq!(
+            fs::metadata(&paths.directory).unwrap().mode() & 0o777,
+            0o700
+        );
+        f.store.verify_capture(&record).unwrap();
+        fs::write(&paths.stdout, "old\npassword=hidden\nlast\n").unwrap();
+        let logs = f
+            .store
+            .read_logs(&record, crate::logs::LogLimits::new(2, 64).unwrap())
+            .unwrap();
+        assert!(logs[0].redacted && logs[0].lines_truncated);
+        assert!(!logs[0].text.contains("hidden"));
+        assert!(logs[1].empty && !logs[1].missing);
+        f.store
+            .apply(&f.store.plan_remove(&f.manifest.id).unwrap())
+            .unwrap();
+        assert!(paths.stdout.exists());
+        assert!(f.store.list().unwrap().is_empty());
+        f.add();
+        let new_paths = f
+            .store
+            .log_paths(&f.store.read(&f.manifest.id).unwrap())
+            .unwrap()
+            .unwrap();
+        assert_ne!(new_paths.directory, paths.directory);
+        assert!(fs::read_to_string(paths.stdout).unwrap().contains("hidden"));
+    }
+    #[test]
+    fn legacy_mac_records_remain_readable_until_explicit_update() {
+        let f = mac_fixture();
+        fs::create_dir(&f.store.state_dir).unwrap();
+        fs::set_permissions(&f.store.state_dir, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::create_dir(&f.store.native_dir).unwrap();
+        let legacy = f.store.expected(&f.manifest, 1, None).unwrap();
+        let text = toml::to_string(&legacy).unwrap();
+        assert!(!text.contains("log_generation"));
+        fs::write(
+            f.store.definition_path(&f.manifest.id).unwrap(),
+            &legacy.native_bytes,
+        )
+        .unwrap();
+        fs::write(f.store.state_dir.join("test-job.toml"), &text).unwrap();
+        assert_eq!(f.store.read(&f.manifest.id).unwrap(), legacy);
+        assert!(f.store.plan_add(&f.manifest).unwrap().is_noop());
+        assert!(!f.store.state_dir.join("logs").exists());
+        assert_eq!(
+            f.store
+                .read_logs(&legacy, crate::logs::LogLimits::new(10, 64).unwrap())
+                .unwrap_err()
+                .code,
+            "log_capture_unavailable"
+        );
+        let plan = f.store.plan_update(&f.manifest).unwrap();
+        assert!(!plan.is_noop());
+        assert!(!f.store.state_dir.join("logs").exists());
+        f.store.apply(&plan).unwrap();
+        let current = f.store.read(&f.manifest.id).unwrap();
+        assert_eq!(current.schema_version, 2);
+        assert!(f.store.plan_update(&f.manifest).unwrap().is_noop());
+        let mut changed = f.manifest.clone();
+        changed.args.push("new".into());
+        f.store
+            .apply(&f.store.plan_update(&changed).unwrap())
+            .unwrap();
+        assert_eq!(
+            f.store.read(&f.manifest.id).unwrap().log_generation,
+            current.log_generation
+        );
+    }
+    #[test]
+    fn unsafe_or_missing_capture_is_never_repaired_by_reading() {
+        for kind in ["symlink", "hardlink", "public", "missing", "marker"] {
+            let f = mac_fixture();
+            f.add();
+            let record = f.store.read(&f.manifest.id).unwrap();
+            let paths = f.store.log_paths(&record).unwrap().unwrap();
+            let outside = f.manifest.cwd.join("outside");
+            fs::write(&outside, "untouched").unwrap();
+            match kind {
+                "symlink" => {
+                    fs::remove_file(&paths.stdout).unwrap();
+                    symlink(&outside, &paths.stdout).unwrap();
+                }
+                "hardlink" => {
+                    fs::remove_file(&paths.stdout).unwrap();
+                    fs::hard_link(&outside, &paths.stdout).unwrap();
+                }
+                "public" => {
+                    fs::set_permissions(&paths.stdout, fs::Permissions::from_mode(0o644)).unwrap()
+                }
+                "missing" => fs::remove_file(&paths.stdout).unwrap(),
+                _ => fs::write(paths.directory.join(".owner"), "foreign").unwrap(),
+            }
+            assert!(f.store.verify_capture(&record).is_err(), "{kind}");
+            let logs = f
+                .store
+                .read_logs(&record, crate::logs::LogLimits::new(10, 64).unwrap());
+            if kind == "missing" {
+                assert!(logs.unwrap()[0].missing);
+            } else {
+                assert!(logs.is_err(), "{kind}");
+            }
+            assert_eq!(fs::read_to_string(&outside).unwrap(), "untouched");
+        }
+    }
+    #[test]
+    fn foreign_log_roots_and_generation_collisions_are_refused() {
+        let f = mac_fixture();
+        fs::create_dir(&f.store.state_dir).unwrap();
+        fs::set_permissions(&f.store.state_dir, fs::Permissions::from_mode(0o700)).unwrap();
+        let root = f.store.state_dir.join("logs");
+        fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::write(root.join("foreign"), "untouched").unwrap();
+        assert_eq!(
+            f.store.plan_add(&f.manifest).unwrap_err().code,
+            "log_ownership"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("foreign")).unwrap(),
+            "untouched"
+        );
+        fs::remove_file(root.join("foreign")).unwrap();
+        let plan = f.store.plan_add(&f.manifest).unwrap();
+        let paths = f
+            .store
+            .log_paths(plan.after.as_ref().unwrap())
+            .unwrap()
+            .unwrap();
+        fs::write(root.join(".owner"), LOG_ROOT_MARKER).unwrap();
+        fs::set_permissions(root.join(".owner"), fs::Permissions::from_mode(0o600)).unwrap();
+        fs::create_dir(&paths.directory).unwrap();
+        fs::set_permissions(&paths.directory, fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(f.store.apply(&plan).unwrap_err().code, "log_collision");
+        assert!(!f.store.state_dir.join(JOURNAL).exists());
+    }
+    #[test]
+    fn unsafe_generation_and_public_state_are_refused_without_chmod() {
+        let f = mac_fixture();
+        for value in ["../outside", "ABCDEF", "", &"0".repeat(33)] {
+            assert!(f.store.capture_paths(&f.manifest.id, value).is_err());
+        }
+        fs::create_dir(&f.store.state_dir).unwrap();
+        fs::set_permissions(&f.store.state_dir, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            f.store.plan_add(&f.manifest).unwrap_err().code,
+            "unsafe_log_path"
+        );
+        assert_eq!(
+            fs::metadata(&f.store.state_dir).unwrap().mode() & 0o777,
+            0o755
+        );
     }
     #[test]
     fn planning_creates_no_directories_or_locks() {

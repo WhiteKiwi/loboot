@@ -90,6 +90,12 @@ enum Commands {
     },
     Logs {
         id: String,
+        /// Maximum text lines per source.
+        #[arg(long, default_value_t = loboot::logs::DEFAULT_LINES)]
+        lines: usize,
+        /// Maximum returned bytes per source (up to 1 MiB).
+        #[arg(long, default_value_t = loboot::logs::DEFAULT_BYTES)]
+        max_bytes: usize,
     },
     Explain {
         manifest: PathBuf,
@@ -224,6 +230,11 @@ fn run(cli: &Cli) -> Result<Value> {
         }
         Commands::Remove { id } => {
             let plan = ctx.store.plan_remove(id)?;
+            let retained_logs = if plan.is_noop() {
+                None
+            } else {
+                ctx.store.log_paths(&ctx.store.read(id)?)?
+            };
             if cli.dry_run {
                 return Ok(
                     json!({"dry_run":true,"plan":plan,"preconditions":"native job must be stopped and disabled; checked only on apply","native_commands":filesystem_commands(&ctx,id,false,plan.is_noop())?}),
@@ -239,15 +250,19 @@ fn run(cli: &Cli) -> Result<Value> {
                 sync_after_write(&ctx)?;
             }
             Ok(
-                json!({"applied":plan,"note":"Definition removed. No process was stopped implicitly."}),
+                json!({"applied":plan,"retained_logs":retained_logs,"note":"Definition removed. No process was stopped implicitly; captured logs are retained for deliberate private cleanup."}),
             )
         }
         Commands::List => Ok(json!({"services":ctx.store.list()?})),
-        Commands::Show { id } => Ok(json!({"service":ctx.store.read(id)?})),
+        Commands::Show { id } => {
+            let record = ctx.store.read(id)?;
+            Ok(json!({"log_capture":ctx.store.log_paths(&record)?,"service":record}))
+        }
         Commands::Explain { manifest } => {
             let m = loboot::model::read(manifest)?;
+            let preview = ctx.store.preview(&m)?;
             Ok(
-                json!({"manifest":m,"platform":ctx.platform,"native_definition":ctx.platform.render(&m)?,"login_scope":"user manager activation; not every simultaneous login","capabilities":capabilities(ctx.platform)}),
+                json!({"manifest":m,"platform":ctx.platform,"native_definition":preview.native_bytes,"log_capture":ctx.store.log_paths(&preview)?,"login_scope":"user manager activation; not every simultaneous login","capabilities":capabilities(ctx.platform)}),
             )
         }
         Commands::Discover => discover(&ctx.native_dir, &ctx.store),
@@ -281,19 +296,37 @@ fn run(cli: &Cli) -> Result<Value> {
             require_live(&ctx)?;
             let mut runner = ProcessRunner;
             let session = ctx.platform.session_check(&mut runner)?;
+            let status = ctx.platform.status(id, &session, &mut runner)?;
             Ok(
-                json!({"id":id,"installed":true,"native":ctx.platform.status(id,&session,&mut runner)?}),
+                json!({"id":id,"installed":true,"diagnostics":ctx.platform.diagnostics(&status),"native":status}),
             )
         }
-        Commands::Logs { id } => {
-            ctx.store.read(id)?;
-            Err(Error::new(
-                "unsupported_capability",
-                format!(
-                    "logs is not implemented in v0.1; inspect native logs for {} using journalctl --user on Linux or Console on macOS",
-                    ctx.platform.native_name(id)
-                ),
-            ))
+        Commands::Logs {
+            id,
+            lines,
+            max_bytes,
+        } => {
+            let limits = loboot::logs::LogLimits::new(*lines, *max_bytes)?;
+            let record = ctx.store.read(id)?;
+            if cli.dry_run {
+                let source = if ctx.platform == Platform::Linux {
+                    json!({"command":ctx.platform.journal_plan(id, limits.lines)?})
+                } else {
+                    json!({"paths":ctx.store.log_paths(&record)?,"legacy_capture":record.log_generation.is_none()})
+                };
+                return Ok(
+                    json!({"dry_run":true,"id":id,"limits":limits,"source":source,"executed":false}),
+                );
+            }
+            let sources = if ctx.platform == Platform::Linux {
+                require_live(&ctx)?;
+                vec![loboot::logs::read_journal(id, limits, &mut ProcessRunner)?]
+            } else {
+                ctx.store.read_logs(&record, limits)?
+            };
+            Ok(
+                json!({"id":id,"limits":limits,"sources":sources,"redaction":"best-effort common token forms only; arbitrary application logs may contain sensitive data","retention":if ctx.platform == Platform::Macos {"append-only capture; no unattended disk cap; rotate only while stopped/unloaded"} else {"native journal retention is managed by the host; loboot does not vacuum or change it"}}),
+            )
         }
         Commands::Start { id } => runtime(cli, &ctx, Action::Start, id),
         Commands::Stop { id } => runtime(cli, &ctx, Action::Stop, id),
@@ -488,6 +521,9 @@ fn apply_native_action(
     observer: &mut dyn TeardownObserver,
 ) -> Result<Value> {
     let owned_before = ctx.store.read(id)?;
+    if matches!(action, Action::Start | Action::Restart | Action::Enable) {
+        ctx.store.verify_capture(&owned_before)?;
+    }
     let definition = ctx.store.definition_path(id)?;
     let session = ctx.platform.session_check(runner)?;
     let before = ctx.platform.status(id, &session, runner)?;
@@ -524,6 +560,7 @@ fn apply_native_action(
                 ));
             }
             if action == Action::Restart {
+                ctx.store.verify_capture(&owned_after).map_err(|e| Error::new("partial_failure", format!("bootout completed, but capture paths changed: {e}. No bootstrap was attempted.")))?;
                 let remaining = ctx.platform.command_plan_with_status(action, id, &definition, &session, &stopped)
                     .map_err(|e| Error::new("partial_failure", format!("bootout completed, but restart preconditions changed: {e}. No bootstrap was attempted.")))?;
                 if remaining != commands[index + 1..] {
@@ -554,14 +591,13 @@ fn apply_native_action(
 fn execute(runner: &mut dyn Runner, commands: &[CommandSpec]) -> Result<()> {
     for (index, c) in commands.iter().enumerate() {
         let out=runner.run(c).map_err(|e|Error::new("partial_failure",format!("Command {index}/{} could not run after {index} completed: {e}. Inspect status before retrying.",commands.len())))?;
-        if !out.success {
+        if !out.success || !out.is_complete() {
             return Err(Error::new(
                 "partial_failure",
                 format!(
-                    "Command {index}/{} failed after {index} completed (exit {:?}): {}. Inspect status before retrying.",
+                    "Command {index}/{} failed after {index} completed: {}. Inspect status before retrying.",
                     commands.len(),
-                    out.code,
-                    out.stderr.trim()
+                    out.failure_summary()
                 ),
             ));
         }
@@ -569,7 +605,7 @@ fn execute(runner: &mut dyn Runner, commands: &[CommandSpec]) -> Result<()> {
     Ok(())
 }
 fn capabilities(p: Platform) -> Value {
-    json!({"runtime":true,"login_persistence":true,"platform":p,"system_scope":false,"windows":false,"logs":false,"secrets":false})
+    json!({"runtime":true,"login_persistence":true,"platform":p,"system_scope":false,"windows":false,"logs":true,"secrets":false})
 }
 fn discover(dir: &Path, store: &Store) -> Result<Value> {
     let managed = store.list()?;
@@ -612,6 +648,7 @@ mod tests {
                 code: Some(if self.calls.len() == self.fail { 9 } else { 0 }),
                 stdout: String::new(),
                 stderr: "injected failure".into(),
+                ..Default::default()
             })
         }
     }
@@ -651,6 +688,7 @@ mod tests {
         calls: Vec<CommandSpec>,
         tamper: Option<(usize, PathBuf)>,
         record_change: Option<(usize, Store, loboot::model::Manifest)>,
+        capture_tamper: Option<(usize, PathBuf)>,
     }
     impl Runner for ScriptedRunner {
         fn run(&mut self, command: &CommandSpec) -> Result<CommandOutput> {
@@ -659,6 +697,12 @@ mod tests {
                 && self.calls.len() == *at
             {
                 std::fs::write(path, "foreign replacement").unwrap();
+            }
+            if let Some((at, path)) = &self.capture_tamper
+                && self.calls.len() == *at
+            {
+                std::fs::remove_file(path).unwrap();
+                std::os::unix::fs::symlink("/unrelated-log", path).unwrap();
             }
             if let Some((at, store, manifest)) = &self.record_change
                 && self.calls.len() == *at
@@ -701,6 +745,7 @@ mod tests {
             code: Some(if success { 0 } else { 113 }),
             stdout: stdout.into(),
             stderr: stderr.into(),
+            ..Default::default()
         }
     }
     fn native_context() -> (tempfile::TempDir, Context, PathBuf) {
@@ -775,6 +820,7 @@ mod tests {
             calls: vec![],
             tamper: None,
             record_change: None,
+            capture_tamper: None,
         }
     }
     fn mutations(runner: &ScriptedRunner) -> Vec<&str> {
@@ -982,7 +1028,7 @@ mod tests {
             ("sigtermed", Some("42"), false, "status_required"),
             ("SIGTERMed", None, false, "status_required"),
             ("SIGTERMed", Some("0"), false, "status_required"),
-            ("running", Some("garbage"), false, "status_required"),
+            ("running", Some("garbage"), false, "status_unavailable"),
             ("running", Some("43"), true, "native_conflict"),
         ] {
             let (_temp, ctx, definition) = native_context();
@@ -1009,6 +1055,30 @@ mod tests {
             assert!(error.message.contains(code));
             assert_eq!(mutations(&runner), ["bootout"]);
         }
+    }
+    #[test]
+    fn mac_restart_rechecks_capture_after_bootout_before_bootstrap() {
+        let (_temp, ctx, definition) = native_context();
+        let record = ctx.store.read("example").unwrap();
+        let paths = ctx.store.log_paths(&record).unwrap().unwrap();
+        let mut runner = restart_runner(&definition);
+        runner.capture_tamper = Some((4, paths.stdout));
+        for _ in 0..2 {
+            runner
+                .outputs
+                .extend(launchd_observation(&definition, "absent", None, true));
+        }
+        let error = apply_native_action(
+            &ctx,
+            Action::Restart,
+            "example",
+            &mut runner,
+            &mut FakeObserver::default(),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "partial_failure");
+        assert!(error.message.contains("capture paths changed"));
+        assert_eq!(mutations(&runner), ["bootout"]);
     }
     #[test]
     fn mac_restart_revalidates_disabled_preference_after_bootout() {
@@ -1121,6 +1191,7 @@ mod tests {
                 calls: vec![],
                 tamper: None,
                 record_change: None,
+                capture_tamper: None,
             };
             runner
                 .outputs
@@ -1145,6 +1216,7 @@ mod tests {
             calls: vec![],
             tamper: None,
             record_change: None,
+            capture_tamper: None,
         };
         runner
             .outputs

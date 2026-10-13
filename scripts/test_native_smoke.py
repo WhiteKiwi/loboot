@@ -51,7 +51,7 @@ class FakeSmoke(smoke.NativeSmoke):
         if self.break_action == args[0]:
             self.break_action = None
             return self.error("injected_failure")
-        action, id = args
+        action, id = args[:2]
         if action in ("add", "update"):
             fields = dict(line.split(" = ", 1) for line in Path(id).read_text().splitlines())
             manifest = {key: json.loads(value) for key, value in fields.items()}
@@ -64,15 +64,33 @@ class FakeSmoke(smoke.NativeSmoke):
             (self.state_dir / ".lock").touch()
             (self.state_dir / f"{id}.toml").write_text(json.dumps(manifest))
             (self.native_dir / self.native_name(id)).write_text(json.dumps(manifest))
+            if self.system == "Darwin" and "generation" not in self.jobs[id]:
+                generation = smoke.uuid.uuid4().hex
+                self.jobs[id]["generation"] = generation
+                root = self.state_dir / "logs"
+                root.mkdir(mode=0o700, exist_ok=True)
+                marker = root / ".owner"
+                marker.write_bytes(b"loboot.private-log-root/v1\n"); marker.chmod(0o600)
+                directory = root / f"{id}-{generation}"
+                directory.mkdir(mode=0o700)
+                for name, content in ((".owner", f"loboot.private-log-generation/v1\n{id}\n{generation}\n"), ("stdout.log", ""), ("stderr.log", "")):
+                    file = directory / name; file.write_text(content); file.chmod(0o600)
             return self.envelope({})
         if id not in self.jobs:
             return self.envelope({}) if action == "remove" else self.error("not_managed")
         job = self.jobs[id]
         if action == "show":
             manifest = json.loads((self.state_dir / f"{id}.toml").read_text())
-            return self.envelope({"service": {"manifest": manifest}})
+            return self.envelope({"service": {"manifest": manifest, "schema_version": 2 if self.system == "Darwin" else 1,
+                                               "log_generation": job.get("generation")}})
+        if action == "logs":
+            size = int(args[args.index("--max-bytes") + 1]) if "--max-bytes" in args else 65536
+            content = "loboot-stdout-marker\nloboot-stderr-marker token=[REDACTED]\n"[:size]
+            if "--lines" in args and args[args.index("--lines") + 1] == "1":
+                content = content.splitlines(keepends=True)[0]
+            return self.envelope({"sources": [{"text": content, "bytes_returned": len(content), "lines_returned": len(content.splitlines())}]})
         if action == "status":
-            return self.envelope({"native": job.copy()})
+            return self.envelope({"native": job.copy(), "diagnostics": [{"code": "native_exit"}] if job["raw"].get("ExecMainStatus") == "23" else []})
         if action == "enable":
             job["enabled"] = True
             if self.system == "Linux":
@@ -259,6 +277,27 @@ class NativeSmokeTests(unittest.TestCase):
         self.assertEqual(foreign.read_text(), "original bytes")
         self.assertEqual(fake.evidence["cleanup_errors"], [])
         self.assertFalse(fake.sandbox.exists())
+
+    def test_capture_cleanup_refuses_unknown_files_and_symlinks(self):
+        for kind in ("extra", "symlink"):
+            root = self.root / kind
+            root.mkdir()
+            fake = FakeSmoke(root, "Darwin")
+            self.assertTrue(fake.preflight())
+            fake.lifecycle()
+            id, generation = next(iter(fake.captures.items()))
+            directory = fake.state_dir / "logs" / f"{id}-{generation}"
+            outside = root / "unrelated"
+            outside.write_text("untouched")
+            if kind == "extra":
+                (directory / "unexpected").write_text("foreign")
+            else:
+                (directory / "stdout.log").unlink()
+                (directory / "stdout.log").symlink_to(outside)
+            fake.cleanup()
+            self.assertTrue(fake.evidence["cleanup_errors"])
+            self.assertEqual(outside.read_text(), "untouched")
+            self.assertTrue(directory.exists())
 
     def test_cleanup_drift_refuses_fallback_mutation(self):
         fake = FakeSmoke(self.root)

@@ -24,7 +24,7 @@ Do not retry a mutating command blindly after a native failure. Some steps may a
 | `service_not_disabled` | Removal requires a stopped job and disabled future activation. |
 | `store_busy`, `stale_plan`, `state_changed` | Another operation is active or the filesystem changed. Wait for it, inspect state, and prepare a fresh plan. Do not delete the lock file to bypass coordination. |
 | `status_required`, `status_unavailable`, `native_output` | Native observations are incomplete or unrecognized. Retain sanitized raw output; unknown is not stopped/disabled. |
-| `unsupported_capability` | The requested feature, currently `logs`, is intentionally unimplemented. Use native/app logging. |
+| `unsupported_capability` | The requested backend capability is unavailable; inspect the command and platform. |
 
 ## Native partial progress
 
@@ -67,3 +67,13 @@ Do not delete `.pending.json` just to clear the error, copy one side of a pair a
 ## Reporting a reproducible issue
 
 Include the source commit, platform/architecture, sanitized command/manifest, exit code, JSON error code, and which stages passed or were never run. Say whether this was `--root`, dry-run, fake-runner testing, or a real user session. Follow [security guidance](SECURITY.md) before posting sensitive logs or exploit details.
+
+## Log refusals (unreleased)
+
+- `invalid_log_limit`: use 1–10000 lines and 1–1048576 bytes per source.
+- `log_capture_unavailable`: legacy macOS definition has no capture. Stop/unload, then explicitly update its original manifest.
+- `unsafe_log_path`, `log_ownership`, `log_collision`: preserve evidence; do not adopt existing files, follow links, or silently repair permissions.
+- `log_capture_missing`: a capture needed for a future launch is missing. Restore verified private files while the job is stopped; do not start with uncertain paths.
+- `logs_unavailable`: a journal query failed, timed out or produced unreliable diagnostics. This is not proof that logs are empty.
+
+`status` supplies bounded fixed failure hints; `logs` may help distinguish executable, cwd and application failures. Redaction is best effort only. Follow [retention and privacy guidance](OPERATOR.md#logs) before rotating or sharing output.

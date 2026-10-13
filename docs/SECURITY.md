@@ -23,7 +23,7 @@ Advisory locks serialize cooperating loboot commands only. External native tools
 
 ## Plaintext data and reports
 
-Manifests, argv, paths, rendered definitions, JSON output, and recovery journals can contain ordinary application information in plaintext. There is no secret store, environment injection, credential redaction guarantee, or encrypted state feature. Do not put passwords, tokens, or other credentials in arguments or manifests.
+Manifests, argv, paths, rendered definitions, JSON output, and recovery journals can contain ordinary application information in plaintext. There is no secret store, environment injection, comprehensive credential-redaction guarantee, or encrypted state feature. Log reads redact some common assignment/header forms, but unlabelled, split, encoded or unfamiliar application secrets can still appear. Do not put passwords, tokens, or other credentials in arguments or manifests.
 
 Before sharing a bug report, inspect and redact output from `show`, `explain`, `doctor`, `status`, native stderr, or a journal. Preserve enough non-sensitive path/argv structure to reproduce the issue. Never attach an entire home directory or unreviewed environment dump.
 
@@ -36,3 +36,9 @@ Useful evidence includes the exact source revision, `loboot --version`, OS/archi
 ## Distribution boundary
 
 Source builds, experimental GitHub release archives, and the WhiteKiwi Homebrew formula are described in [installation](INSTALL.md). Packaging rehearsal artifacts are not a published release. SHA-256 checksums detect changed bytes; they are not independent publisher authentication. macOS archives are unsigned/unnotarized. Publication requires the approved version, exact-revision checks, license notices, and gates in [RELEASE.md](RELEASE.md). Do not bypass OS executable protections to try an unverified artifact.
+
+## Output capture (unreleased)
+
+Native subprocess stdout/stderr capture is bounded and has an observation deadline. Failed/incomplete native operations can still have partial effects; never infer rollback from a timeout. Read-only status output uses allowlisted scalar fields and fixed hints. Log content is deliberately separate and remains potentially sensitive.
+
+Private macOS captures require current effective UID ownership, 0700 directories and 0600 single-link regular files, with descriptor-relative no-follow access and exact ownership markers. Public or altered paths are refused rather than chmodded/repaired. The account owner and administrators remain trusted; later replacement by that same account, program-created descendants, and launchd's future path opens are outside a sandbox guarantee. Active files have no automatic disk-growth limit. Removing a service retains its capture evidence for deliberate cleanup.

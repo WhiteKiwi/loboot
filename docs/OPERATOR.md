@@ -106,13 +106,25 @@ A native command can succeed even though a short job has already exited or an ap
 
 ### Logs
 
-`loboot logs ID` returns `unsupported_capability`. Linux's journal can be inspected directly:
+Source builds after v0.1.0 support bounded output and fixed failure hints:
 
 ```sh
-journalctl --user -u loboot-worker.service
+loboot status worker --json
+loboot logs worker --lines 100 --max-bytes 65536 --json
+loboot logs worker --dry-run --json
 ```
 
-On macOS, inspect the exact job through `launchctl print gui/$(id -u)/com.loboot.worker` and use Console or the application's own logging. loboot does not configure output capture or promise that a process's stdout/stderr is available through Console.
+Linux reads the existing user journal without changing its retention or permissions. macOS new definitions capture stdout/stderr under private `~/.local/share/loboot/logs/ID-GENERATION/` directories. `show` reports `log_capture` paths. Existing schema-1 definitions remain unchanged and readable; stop/unload the job and explicitly `update` its original manifest to opt into schema-2 capture, then start only when intended. Identical `add` does not migrate it. Existing captured generations persist across updates. Downgrading the binary to v0.1.0 does not roll back schema-2 records; that older binary cannot manage them.
+
+Reads are bounded per source and report missing, empty, truncation, invalid encoding, and best-effort redaction separately. Never assume arbitrary application-written output is secret-free. Inspect it before sharing, and keep credentials out of arguments and logs. Native exit diagnostics add fixed hints without dumping the environment or arbitrary manager stderr. See the [JSON contract](CLI.md#bounded-logs-and-diagnostics-unreleased).
+
+### Retention and deliberate rotation
+
+Capture files append while launchd runs a job. **There is no unattended disk cap or automatic rotation.** Bounded reads do not bound on-disk growth. Choose programs with appropriate output volume, inspect disk use, and rotate deliberately. Linux journal retention remains the host administrator's responsibility; loboot never vacuums a shared journal.
+
+For macOS rotation, explicitly stop/unload the exact owned job first and verify all of its processes have exited. Use `show ID --json` to verify the exact current generation paths and private ownership (directories 0700, files 0600, no links). Back up only the desired bounded/private history, then truncate the two existing regular files in place using trusted local tools; preserve their ownership, modes and `.owner` markers. Do not move/replace/truncate an active capture or manipulate a shared directory. Inspect with `logs`, then deliberately start again if wanted. Permission repair, rotation and deletion are not implicit loboot actions.
+
+`remove` retains captured data and returns `retained_logs` paths. Reusing an ID allocates a fresh generation and never adopts or truncates old logs. Remove retained files only after verifying their exact former generation, all associated jobs/processes are gone, and any needed evidence is backed up. An unknown/malformed marker or unexpected file means stop and investigate, not recursively delete. An interrupted initialization leaves the normal recovery journal; preserve it and the log remnants for explicit recovery.
 
 ## State and native locations
 

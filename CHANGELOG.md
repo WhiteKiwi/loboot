@@ -6,6 +6,7 @@ This file records user-facing changes. Versioned entries supply the curated GitH
 
 ### Added
 
+- Bounded Linux user-journal and private macOS stdout/stderr reads, fixed failure diagnostics, and byte/deadline-limited native helper capture. Legacy records remain readable; explicit stopped update opts macOS jobs into schema-2 capture. Application logs remain potentially sensitive and active file growth is not automatically capped.
 - Explicit isolated-account logout/login acceptance protocol, scoped invocation fixture, and bounded offline evidence validation. Synthetic tests verify report consistency only; real Linux/macOS session acceptance remains pending.
 
 ### Fixed
