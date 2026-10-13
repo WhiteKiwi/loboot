@@ -117,6 +117,9 @@ class FakeSmoke(smoke.NativeSmoke):
     def native_name(self, id):
         return f"loboot-{id}.service" if self.system == "Linux" else f"com.loboot.{id}.plist"
 
+    def capture_failure_diagnostics(self):
+        self.evidence["fake_failure_diagnostics"] = True
+
     def native_absent(self, id):
         smoke.require(id not in self.jobs, "fixture still loaded")
 
@@ -322,6 +325,25 @@ class NativeSmokeTests(unittest.TestCase):
             fake = FakeSmoke(other)
             with patch.object(smoke.subprocess, "run", return_value=result), self.assertRaises(smoke.SmokeError):
                 smoke.NativeSmoke.command(fake, ["doctor"])
+
+    def test_failure_diagnostics_are_read_only_and_scoped_to_owned_labels(self):
+        fake = FakeSmoke(self.root, "Darwin")
+        fake.ids = ["owned"]
+        results = [SimpleNamespace(returncode=113, stdout="", stderr="missing job"),
+                   SimpleNamespace(returncode=0, stdout='disabled services = {\n"com.loboot.owned" => disabled\n"com.foreign.job" => enabled\n}\n', stderr="")]
+        with patch.object(smoke.subprocess, "run", side_effect=results) as run:
+            smoke.NativeSmoke.capture_failure_diagnostics(fake)
+        self.assertEqual([call.args[0][1] for call in run.call_args_list], ["print", "print-disabled"])
+        records = fake.evidence["failure_diagnostics"]
+        self.assertEqual(records[1]["stdout"], '"com.loboot.owned" => disabled')
+        self.assertNotIn("com.foreign", json.dumps(records))
+
+    def test_failure_diagnostic_errors_do_not_block_cleanup(self):
+        fake = FakeSmoke(self.root)
+        fake.ids = ["owned"]
+        with patch.object(smoke.subprocess, "run", side_effect=OSError("manager missing")):
+            smoke.NativeSmoke.capture_failure_diagnostics(fake)
+        self.assertEqual(fake.evidence["failure_diagnostics"][0]["error"], "manager missing")
 
     def test_linux_cleanup_requires_not_found_inactive_and_zero_pid(self):
         fake = FakeSmoke(self.root)

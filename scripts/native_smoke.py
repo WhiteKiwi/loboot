@@ -393,6 +393,35 @@ class NativeSmoke:
             require(result.returncode in (3, 113) and f'Could not find service "com.loboot.{id}" in domain' in result.stderr,
                     f"launchd job not confirmed absent: {id}: {result.stdout} {result.stderr}")
 
+    def capture_failure_diagnostics(self):
+        """Best-effort, read-only native output scoped to this run's labels."""
+        commands = []
+        for id in self.ids:
+            if self.system == "Linux":
+                commands.append(["systemctl", "--user", "show", "--no-pager",
+                                 "--property=LoadState,ActiveState,SubState,UnitFileState,MainPID,ExecMainStatus,Result,FragmentPath,DropInPaths",
+                                 "--", f"loboot-{id}.service"])
+            else:
+                commands.append(["/bin/launchctl", "print", f"gui/{os.getuid()}/com.loboot.{id}"])
+        if self.system == "Darwin" and self.ids:
+            commands.append(["/bin/launchctl", "print-disabled", f"gui/{os.getuid()}"])
+        for command in commands:
+            record = {"args": command}
+            try:
+                result = subprocess.run(command, env=self.env, text=True, capture_output=True, timeout=5)
+                stdout = result.stdout
+                if "print-disabled" in command:
+                    # print-disabled has no single-label form. Retain raw lines
+                    # for only our labels, not unrelated runner overrides.
+                    labels = [f'"com.loboot.{id}"' for id in self.ids]
+                    stdout = "\n".join(line for line in stdout.splitlines()
+                                       if any(label in line for label in labels))
+                    record["stdout_scope"] = "owned-label lines only"
+                record.update(exit_code=result.returncode, stdout=stdout, stderr=result.stderr)
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                record["error"] = str(exc)
+            self.evidence.setdefault("failure_diagnostics", []).append(record)
+
     def cleanup(self):
         for id in reversed(self.ids):
             try:
@@ -441,8 +470,11 @@ class NativeSmoke:
             self.evidence["status"] = "passed"
         except (SmokeError, OSError, subprocess.TimeoutExpired) as exc:
             self.evidence["error"] = str(exc)
+            self.capture_failure_diagnostics()
         finally:
             self.cleanup()
+        if self.evidence["cleanup_errors"] and "error" not in self.evidence:
+            self.capture_failure_diagnostics()
         return 0 if self.evidence["status"] == "passed" else 1
 
 
