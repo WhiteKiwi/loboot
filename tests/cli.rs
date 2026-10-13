@@ -285,23 +285,42 @@ impl RecoveryFixture {
             }
             "update" => {
                 let text = fs::read_to_string(&manifest_path).unwrap();
-                fs::write(&manifest_path, text.replace("literal $HOME %n", "new literal $HOME %n")).unwrap();
+                fs::write(
+                    &manifest_path,
+                    text.replace("literal $HOME %n", "new literal $HOME %n"),
+                )
+                .unwrap();
                 let updated = call(&root, &["update", manifest_path.to_str().unwrap()]);
                 assert!(updated.status.success(), "{}", value(&updated));
                 let after = value(&call(&root, &["show", "hello"]))["data"]["service"].clone();
                 // Ownership is after while the native definition is still before.
-                fs::write(root.join("native/loboot-hello.service"), installed["native_bytes"].as_str().unwrap()).unwrap();
+                fs::write(
+                    root.join("native/loboot-hello.service"),
+                    installed["native_bytes"].as_str().unwrap(),
+                )
+                .unwrap();
                 (installed, after)
             }
             _ => panic!("unsupported fixture operation"),
         };
-        fs::write(root.join("state/.pending.json"), serde_json::to_vec(&serde_json::json!({
-            "schema_version":1,"operation":operation,"id":"hello",
-            "state_dir":root.join("state"),"native_dir":root.join("native"),
-            "before":before,"after":after,
-        })).unwrap()).unwrap();
+        fs::write(
+            root.join("state/.pending.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "schema_version":1,"operation":operation,"id":"hello",
+                "state_dir":root.join("state"),"native_dir":root.join("native"),
+                "before":before,"after":after,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
         fs::remove_file(root.join("state/.lock")).unwrap();
-        Self { _temp: temp, root, saved: base.join("recovery.json"), before, after }
+        Self {
+            _temp: temp,
+            root,
+            saved: base.join("recovery.json"),
+            before,
+            after,
+        }
     }
     fn save_plan(&self, target: &str) -> serde_json::Value {
         let output = call(&self.root, &["recover", "plan", "--to", target]);
@@ -330,7 +349,10 @@ fn recovery_plan_without_journal_never_creates_directories_or_a_lock() {
     ] {
         let output = call(&root, &args);
         assert!(output.status.success(), "{}", value(&output));
-        assert_eq!(value(&output)["data"], serde_json::json!({"pending":false,"plan":null}));
+        assert_eq!(
+            value(&output)["data"],
+            serde_json::json!({"pending":false,"plan":null})
+        );
         assert!(!root.exists());
     }
 }
@@ -344,22 +366,40 @@ fn recovery_offline_plan_preview_apply_and_replay_cover_both_targets() {
             let saved = fixture.save_plan(target);
             assert_eq!(saved["data"]["pending"], true);
             assert_eq!(saved["data"]["plan"]["target"], target);
-            assert_eq!(saved["data"]["plan"]["schema_version"], "loboot.recovery/v1");
+            assert_eq!(
+                saved["data"]["plan"]["schema_version"],
+                "loboot.recovery/v1"
+            );
             assert_eq!(snapshot(&fixture.root), before);
             let preview = fixture.apply(true);
-            assert!(preview.status.success(), "{operation}/{target}: {}", value(&preview));
+            assert!(
+                preview.status.success(),
+                "{operation}/{target}: {}",
+                value(&preview)
+            );
             assert_eq!(value(&preview)["data"]["validated"], true);
             assert_eq!(value(&preview)["data"]["native_checked"], false);
             assert_eq!(snapshot(&fixture.root), before);
             assert!(!fixture.root.join("state/.lock").exists());
             let applied = fixture.apply(false);
-            assert!(applied.status.success(), "{operation}/{target}: {}", value(&applied));
+            assert!(
+                applied.status.success(),
+                "{operation}/{target}: {}",
+                value(&applied)
+            );
             assert!(applied.stderr.is_empty());
             assert_eq!(value(&applied)["data"]["runtime_restored"], false);
             assert_eq!(value(&applied)["data"]["recovered"]["pair_verified"], true);
-            assert_eq!(value(&applied)["data"]["recovered"]["journal_removed"], true);
+            assert_eq!(
+                value(&applied)["data"]["recovered"]["journal_removed"],
+                true
+            );
             assert!(!fixture.root.join("state/.pending.json").exists());
-            let selected = if target == "before" { &fixture.before } else { &fixture.after };
+            let selected = if target == "before" {
+                &fixture.before
+            } else {
+                &fixture.after
+            };
             if selected.is_null() {
                 assert!(!fixture.root.join("state/hello.toml").exists());
                 assert!(!fixture.root.join("native/loboot-hello.service").exists());
@@ -374,7 +414,10 @@ fn recovery_offline_plan_preview_apply_and_replay_cover_both_targets() {
             assert_eq!(value(&replay)["error"]["code"], "no_pending_recovery");
             assert_eq!(snapshot(&fixture.root), recovered);
             let fresh = call(&fixture.root, &["recover", "plan"]);
-            assert_eq!(value(&fresh)["data"], serde_json::json!({"pending":false,"plan":null}));
+            assert_eq!(
+                value(&fresh)["data"],
+                serde_json::json!({"pending":false,"plan":null})
+            );
         }
     }
 }
@@ -388,10 +431,18 @@ fn recovery_default_target_is_before_and_saved_filename_can_be_relative() {
     let output = Command::new(env!("CARGO_BIN_EXE_loboot"))
         .args(["--json", "--root"])
         .arg(&fixture.root)
-        .args(["--platform", "linux", "recover", "apply", "recovery.json", "--dry-run"])
+        .args([
+            "--platform",
+            "linux",
+            "recover",
+            "apply",
+            "recovery.json",
+            "--dry-run",
+        ])
         .current_dir(fixture.saved.parent().unwrap())
         .env("PATH", "")
-        .output().unwrap();
+        .output()
+        .unwrap();
     assert!(output.status.success(), "{}", value(&output));
     assert!(!fixture.root.join("state/.lock").exists());
 }
@@ -402,13 +453,31 @@ fn recovery_rejects_non_envelopes_unknown_fields_and_secret_bearing_parse_errors
     let saved = fixture.save_plan("before");
     let before = snapshot(&fixture.root);
     let mut invalid = vec![
-        saved["data"].clone(), saved["data"]["plan"].clone(),
+        saved["data"].clone(),
+        saved["data"]["plan"].clone(),
         serde_json::json!({"schema_version":"loboot.cli/v1","ok":false,"error":{"message":"private-plan-secret"}}),
     ];
-    for pointer in ["", "/data", "/data/plan", "/data/plan/journal", "/data/plan/journal/before", "/data/plan/journal/before/manifest", "/data/plan/current_native", "/data/plan/current_native/identity", "/data/plan/journal_snapshot/identity"] {
+    for pointer in [
+        "",
+        "/data",
+        "/data/plan",
+        "/data/plan/journal",
+        "/data/plan/journal/before",
+        "/data/plan/journal/before/manifest",
+        "/data/plan/current_native",
+        "/data/plan/current_native/identity",
+        "/data/plan/journal_snapshot/identity",
+    ] {
         let mut edited = saved.clone();
-        edited.pointer_mut(pointer).unwrap().as_object_mut().unwrap()
-            .insert("private-plan-secret".into(), serde_json::json!("private-plan-secret"));
+        edited
+            .pointer_mut(pointer)
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .insert(
+                "private-plan-secret".into(),
+                serde_json::json!("private-plan-secret"),
+            );
         invalid.push(edited);
     }
     for (pointer, replacement) in [
@@ -416,16 +485,31 @@ fn recovery_rejects_non_envelopes_unknown_fields_and_secret_bearing_parse_errors
         ("/ok", serde_json::json!(false)),
         ("/data/pending", serde_json::json!(false)),
         ("/data/plan", serde_json::Value::Null),
-        ("/data/plan/target", serde_json::json!("private-plan-secret")),
-        ("/data/plan/id", serde_json::json!({"private-plan-secret":true})),
+        (
+            "/data/plan/target",
+            serde_json::json!("private-plan-secret"),
+        ),
+        (
+            "/data/plan/id",
+            serde_json::json!({"private-plan-secret":true}),
+        ),
     ] {
         let mut edited = saved.clone();
         *edited.pointer_mut(pointer).unwrap() = replacement;
         invalid.push(edited);
     }
-    for (pointer, field) in [("", "schema_version"), ("/data", "pending"), ("/data", "plan")] {
+    for (pointer, field) in [
+        ("", "schema_version"),
+        ("/data", "pending"),
+        ("/data", "plan"),
+    ] {
         let mut edited = saved.clone();
-        edited.pointer_mut(pointer).unwrap().as_object_mut().unwrap().remove(field);
+        edited
+            .pointer_mut(pointer)
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .remove(field);
         invalid.push(edited);
     }
     for edited in invalid {
@@ -472,12 +556,20 @@ fn recovery_stale_and_edited_plans_preserve_pending_evidence() {
             }
             "native" => {
                 // A different valid endpoint is still stale evidence.
-                fs::write(fixture.root.join("native/loboot-hello.service"), fixture.after["native_bytes"].as_str().unwrap()).unwrap();
+                fs::write(
+                    fixture.root.join("native/loboot-hello.service"),
+                    fixture.after["native_bytes"].as_str().unwrap(),
+                )
+                .unwrap();
                 "stale_plan"
             }
             "metadata" => {
                 use std::os::unix::fs::PermissionsExt;
-                fs::set_permissions(fixture.root.join("native/loboot-hello.service"), fs::Permissions::from_mode(0o400)).unwrap();
+                fs::set_permissions(
+                    fixture.root.join("native/loboot-hello.service"),
+                    fs::Permissions::from_mode(0o400),
+                )
+                .unwrap();
                 "stale_plan"
             }
             "root" => {
@@ -507,7 +599,12 @@ fn recovery_missing_update_target_refuses_without_adopting_absence() {
     let before = snapshot(&fixture.root);
     for args in [
         vec!["recover", "plan"],
-        vec!["recover", "apply", fixture.saved.to_str().unwrap(), "--dry-run"],
+        vec![
+            "recover",
+            "apply",
+            fixture.saved.to_str().unwrap(),
+            "--dry-run",
+        ],
         vec!["recover", "apply", fixture.saved.to_str().unwrap()],
     ] {
         let output = call(&fixture.root, &args);
@@ -527,7 +624,10 @@ fn recovery_plan_input_refuses_symlinks_special_files_and_oversize_data() {
     let directory = fixture.saved.with_file_name("directory.json");
     fs::create_dir(&directory).unwrap();
     let oversized = fixture.saved.with_file_name("oversized.json");
-    fs::File::create(&oversized).unwrap().set_len(64 * 1024 * 1024 + 1).unwrap();
+    fs::File::create(&oversized)
+        .unwrap()
+        .set_len(64 * 1024 * 1024 + 1)
+        .unwrap();
     for path in [&linked, &directory, &oversized] {
         let output = call(&fixture.root, &["recover", "apply", path.to_str().unwrap()]);
         assert!(!output.status.success());

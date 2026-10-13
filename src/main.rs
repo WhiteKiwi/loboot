@@ -59,9 +59,7 @@ enum RecoveryCommands {
         to: RecoveryDestination,
     },
     /// Apply an exact, saved `recover plan --json` response.
-    Apply {
-        plan: PathBuf,
-    },
+    Apply { plan: PathBuf },
 }
 #[derive(Subcommand)]
 enum Commands {
@@ -418,7 +416,9 @@ fn recover(cli: &Cli, ctx: &Context, command: &RecoveryCommands) -> Result<Value
             let outcome = ctx.store.apply_recovery_checked(&plan, || {
                 guard_recovery(ctx, &plan.id, plan.removes_definition(), &mut ProcessRunner)
             })?;
-            Ok(json!({"recovered":outcome,"runtime_restored":false,"note":"Only the selected filesystem pair was recovered. Runtime and enablement were not restored; no native mutation or reload was performed."}))
+            Ok(
+                json!({"recovered":outcome,"runtime_restored":false,"note":"Only the selected filesystem pair was recovered. Runtime and enablement were not restored; no native mutation or reload was performed."}),
+            )
         }
     }
 }
@@ -435,7 +435,10 @@ fn guard_recovery(
         return Ok(());
     }
     let session = ctx.platform.session_check(runner).map_err(|e| {
-        Error::new(e.code, "recovery could not verify the native user session; no native changes were attempted")
+        Error::new(
+            e.code,
+            "recovery could not verify the native user session; no native changes were attempted",
+        )
     })?;
     if ctx.platform == Platform::Linux {
         let command = CommandSpec {
@@ -450,25 +453,36 @@ fn guard_recovery(
                 ctx.platform.native_name(id),
             ],
         };
-        let uncertain = || Error::new(
-            "status_required",
-            "recovery could not prove the native manager has current definitions; inspect native state and deliberately reload outside recovery before saving a fresh plan",
-        );
+        let uncertain = || {
+            Error::new(
+                "status_required",
+                "recovery could not prove the native manager has current definitions; inspect native state and deliberately reload outside recovery before saving a fresh plan",
+            )
+        };
         let output = runner.run(&command).map_err(|_| uncertain())?;
-        if !output.success || output.code != Some(0) || output.signal.is_some() || !output.is_complete() {
+        if !output.success
+            || output.code != Some(0)
+            || output.signal.is_some()
+            || !output.is_complete()
+        {
             return Err(uncertain());
         }
         match output.stdout.trim() {
             "no" => (),
-            "yes" => return Err(Error::new(
-                "native_sync_needed",
-                "native definitions need a reload; inspect native state and deliberately reload outside recovery before saving a fresh plan; recovery did not reload anything",
-            )),
+            "yes" => {
+                return Err(Error::new(
+                    "native_sync_needed",
+                    "native definitions need a reload; inspect native state and deliberately reload outside recovery before saving a fresh plan; recovery did not reload anything",
+                ));
+            }
             _ => return Err(uncertain()),
         }
     }
     let status = ctx.platform.status(id, &session, runner).map_err(|e| {
-        Error::new(e.code, "recovery could not read trustworthy native status; no native changes were attempted")
+        Error::new(
+            e.code,
+            "recovery could not read trustworthy native status; no native changes were attempted",
+        )
     })?;
     ctx.platform
         .verify_managed_status(id, &ctx.store.definition_path(id)?, &status)
@@ -477,9 +491,10 @@ fn guard_recovery(
         })?;
     let stopped = status.running == Some(false)
         && match ctx.platform {
-            Platform::Linux => status.raw.get("ActiveState").is_some_and(|state| {
-                matches!(state.as_str(), "inactive" | "failed")
-            }),
+            Platform::Linux => status
+                .raw
+                .get("ActiveState")
+                .is_some_and(|state| matches!(state.as_str(), "inactive" | "failed")),
             Platform::Macos => status.loaded == Some(false),
         };
     if !stopped {
@@ -507,10 +522,12 @@ fn guard_recovery(
                 ctx.platform.native_name(id),
             ],
         };
-        let uncertain = || Error::new(
-            "status_required",
-            "recovery could not verify current native enablement; inspect native state before saving a fresh plan",
-        );
+        let uncertain = || {
+            Error::new(
+                "status_required",
+                "recovery could not verify current native enablement; inspect native state before saving a fresh plan",
+            )
+        };
         let output = runner.run(&command).map_err(|_| uncertain())?;
         if !output.is_complete() || output.signal.is_some() {
             return Err(uncertain());
@@ -1442,7 +1459,12 @@ mod tests {
         let definition = store.definition_path("example").unwrap();
         (
             temp,
-            Context { store, platform: Platform::Linux, native_dir, offline: false },
+            Context {
+                store,
+                platform: Platform::Linux,
+                native_dir,
+                offline: false,
+            },
             definition,
         )
     }
@@ -1457,10 +1479,14 @@ mod tests {
         vec![
             native_output(true, "Version=256\n", ""),
             native_output(true, "no\n", ""),
-            native_output(true, &format!(
-                "LoadState={load}\nActiveState={active}\nSubState=dead\nUnitFileState={enabled}\nMainPID=0\nFragmentPath={}\nDropInPaths={dropins}\n",
-                definition.display(),
-            ), ""),
+            native_output(
+                true,
+                &format!(
+                    "LoadState={load}\nActiveState={active}\nSubState=dead\nUnitFileState={enabled}\nMainPID=0\nFragmentPath={}\nDropInPaths={dropins}\n",
+                    definition.display(),
+                ),
+                "",
+            ),
             CommandOutput {
                 success: false,
                 code: Some(1),
@@ -1475,10 +1501,14 @@ mod tests {
             match platform {
                 Platform::Linux => {
                     assert_eq!(command.args.first().map(String::as_str), Some("--user"));
-                    assert!(matches!(command.args.get(1).map(String::as_str), Some("show" | "is-enabled")));
+                    assert!(matches!(
+                        command.args.get(1).map(String::as_str),
+                        Some("show" | "is-enabled")
+                    ));
                 }
                 Platform::Macos => assert!(matches!(
-                    command.args.first().map(String::as_str), Some("print" | "print-disabled")
+                    command.args.first().map(String::as_str),
+                    Some("print" | "print-disabled")
                 )),
             }
         }
@@ -1491,24 +1521,110 @@ mod tests {
             ("loaded", "inactive", "disabled", "", false, true, None),
             ("loaded", "failed", "disabled", "", false, true, None),
             ("loaded", "inactive", "enabled", "", false, false, None),
-            ("loaded", "inactive", "enabled", "", false, true, Some("service_not_disabled")),
-            ("loaded", "inactive", "enabled-runtime", "", false, true, Some("service_not_disabled")),
-            ("not-found", "inactive", "", "", false, true, Some("service_not_disabled")),
+            (
+                "loaded",
+                "inactive",
+                "enabled",
+                "",
+                false,
+                true,
+                Some("service_not_disabled"),
+            ),
+            (
+                "loaded",
+                "inactive",
+                "enabled-runtime",
+                "",
+                false,
+                true,
+                Some("service_not_disabled"),
+            ),
+            (
+                "not-found",
+                "inactive",
+                "",
+                "",
+                false,
+                true,
+                Some("service_not_disabled"),
+            ),
             ("not-found", "inactive", "disabled", "", false, true, None),
-            ("stub", "inactive", "disabled", "", false, true, Some("status_required")),
-            ("future", "inactive", "disabled", "", false, true, Some("status_required")),
-            ("loaded", "activating", "disabled", "", false, true, Some("service_not_stopped")),
-            ("loaded", "active", "disabled", "", false, true, Some("service_not_stopped")),
-            ("loaded", "inactive", "disabled", "/foreign.conf", false, true, Some("native_conflict")),
-            ("loaded", "inactive", "disabled", "", true, true, Some("native_conflict")),
+            (
+                "stub",
+                "inactive",
+                "disabled",
+                "",
+                false,
+                true,
+                Some("status_required"),
+            ),
+            (
+                "future",
+                "inactive",
+                "disabled",
+                "",
+                false,
+                true,
+                Some("status_required"),
+            ),
+            (
+                "loaded",
+                "activating",
+                "disabled",
+                "",
+                false,
+                true,
+                Some("service_not_stopped"),
+            ),
+            (
+                "loaded",
+                "active",
+                "disabled",
+                "",
+                false,
+                true,
+                Some("service_not_stopped"),
+            ),
+            (
+                "loaded",
+                "inactive",
+                "disabled",
+                "/foreign.conf",
+                false,
+                true,
+                Some("native_conflict"),
+            ),
+            (
+                "loaded",
+                "inactive",
+                "disabled",
+                "",
+                true,
+                true,
+                Some("native_conflict"),
+            ),
         ] {
             let mut runner = recovery_runner(linux_recovery_observation(
-                if foreign { Path::new("/foreign.service") } else { &definition },
-                load, active, enabled, dropins,
+                if foreign {
+                    Path::new("/foreign.service")
+                } else {
+                    &definition
+                },
+                load,
+                active,
+                enabled,
+                dropins,
             ));
             let result = guard_recovery(&ctx, "example", removing, &mut runner);
-            assert_eq!(result.err().map(|e| e.code), expected, "{load}/{active}/{enabled}");
-            assert_eq!(runner.calls.len(), if expected.is_none() && removing { 4 } else { 3 });
+            assert_eq!(
+                result.err().map(|e| e.code),
+                expected,
+                "{load}/{active}/{enabled}"
+            );
+            assert_eq!(
+                runner.calls.len(),
+                if expected.is_none() && removing { 4 } else { 3 }
+            );
             assert_recovery_queries_only(&runner, Platform::Linux);
             assert!(!ctx.store.state_dir().exists());
             assert!(!ctx.native_dir.exists());
@@ -1523,12 +1639,18 @@ mod tests {
             ("", true, false, Some("status_required")),
             ("NO", true, false, Some("status_required")),
             ("no\nyes", true, false, Some("status_required")),
-            ("private-native-secret", true, false, Some("status_required")),
+            (
+                "private-native-secret",
+                true,
+                false,
+                Some("status_required"),
+            ),
             ("no\n", false, false, Some("status_required")),
             ("no\n", true, true, Some("status_required")),
             (" \tno\n", true, false, None),
         ] {
-            let mut outputs = linux_recovery_observation(&definition, "loaded", "inactive", "disabled", "");
+            let mut outputs =
+                linux_recovery_observation(&definition, "loaded", "inactive", "disabled", "");
             outputs[1] = native_output(success, reply, "private-native-secret");
             outputs[1].stdout_truncated = incomplete;
             let mut runner = recovery_runner(outputs);
@@ -1540,14 +1662,28 @@ mod tests {
             }
             assert_eq!(result.err().map(|e| e.code), expected);
             assert_eq!(runner.calls.len(), if expected.is_some() { 2 } else { 4 });
-            assert_eq!(runner.calls[1].args, [
-                "--user", "show", "--property=NeedDaemonReload", "--value", "--no-pager", "--", "loboot-example.service",
-            ]);
+            assert_eq!(
+                runner.calls[1].args,
+                [
+                    "--user",
+                    "show",
+                    "--property=NeedDaemonReload",
+                    "--value",
+                    "--no-pager",
+                    "--",
+                    "loboot-example.service",
+                ]
+            );
             assert_recovery_queries_only(&runner, Platform::Linux);
             assert!(!ctx.store.state_dir().exists());
         }
         let mut runner = recovery_runner(vec![native_output(true, "Version=256\n", "")]);
-        assert_eq!(guard_recovery(&ctx, "example", true, &mut runner).unwrap_err().code, "status_required");
+        assert_eq!(
+            guard_recovery(&ctx, "example", true, &mut runner)
+                .unwrap_err()
+                .code,
+            "status_required"
+        );
         assert_recovery_queries_only(&runner, Platform::Linux);
     }
 
@@ -1558,17 +1694,36 @@ mod tests {
             ("disabled\n", 1, false, false, None),
             (" \tdisabled\n", 1, false, false, None),
             ("disabled\n", 0, true, false, Some("service_not_disabled")),
-            ("enabled-runtime\n", 0, true, false, Some("service_not_disabled")),
+            (
+                "enabled-runtime\n",
+                0,
+                true,
+                false,
+                Some("service_not_disabled"),
+            ),
             ("enabled\n", 0, true, false, Some("service_not_disabled")),
             ("not-found\n", 4, false, false, Some("service_not_disabled")),
             ("static\n", 0, true, false, Some("service_not_disabled")),
             ("static\n", 1, false, false, Some("service_not_disabled")),
             ("", 1, false, false, Some("service_not_disabled")),
-            ("private-native-secret", 1, false, false, Some("service_not_disabled")),
-            ("disabled\nenabled-runtime", 1, false, false, Some("service_not_disabled")),
+            (
+                "private-native-secret",
+                1,
+                false,
+                false,
+                Some("service_not_disabled"),
+            ),
+            (
+                "disabled\nenabled-runtime",
+                1,
+                false,
+                false,
+                Some("service_not_disabled"),
+            ),
             ("disabled\n", 1, false, true, Some("status_required")),
         ] {
-            let mut outputs = linux_recovery_observation(&definition, "loaded", "inactive", "disabled", "");
+            let mut outputs =
+                linux_recovery_observation(&definition, "loaded", "inactive", "disabled", "");
             outputs[3] = CommandOutput {
                 success,
                 code: Some(code),
@@ -1584,14 +1739,29 @@ mod tests {
             }
             assert_eq!(result.err().map(|e| e.code), expected, "{reply}/{code}");
             assert_eq!(runner.calls.len(), 4);
-            assert_eq!(runner.calls[3].args, ["--user", "is-enabled", "--no-pager", "--", "loboot-example.service"]);
+            assert_eq!(
+                runner.calls[3].args,
+                [
+                    "--user",
+                    "is-enabled",
+                    "--no-pager",
+                    "--",
+                    "loboot-example.service"
+                ]
+            );
             assert_recovery_queries_only(&runner, Platform::Linux);
             assert!(!ctx.store.state_dir().exists());
         }
-        let mut outputs = linux_recovery_observation(&definition, "loaded", "inactive", "disabled", "");
+        let mut outputs =
+            linux_recovery_observation(&definition, "loaded", "inactive", "disabled", "");
         outputs.pop();
         let mut runner = recovery_runner(outputs);
-        assert_eq!(guard_recovery(&ctx, "example", true, &mut runner).unwrap_err().code, "status_required");
+        assert_eq!(
+            guard_recovery(&ctx, "example", true, &mut runner)
+                .unwrap_err()
+                .code,
+            "status_required"
+        );
         assert_recovery_queries_only(&runner, Platform::Linux);
     }
 
@@ -1603,9 +1773,23 @@ mod tests {
             std::fs::create_dir_all(&activation).unwrap();
             let link = activation.join("loboot-example.service");
             std::os::unix::fs::symlink("/missing-external-definition", &link).unwrap();
-            let mut runner = recovery_runner(linux_recovery_observation(&definition, "loaded", "inactive", "disabled", ""));
-            assert_eq!(guard_recovery(&ctx, "example", true, &mut runner).unwrap_err().code, "native_collision");
-            assert_eq!(std::fs::read_link(&link).unwrap(), Path::new("/missing-external-definition"));
+            let mut runner = recovery_runner(linux_recovery_observation(
+                &definition,
+                "loaded",
+                "inactive",
+                "disabled",
+                "",
+            ));
+            assert_eq!(
+                guard_recovery(&ctx, "example", true, &mut runner)
+                    .unwrap_err()
+                    .code,
+                "native_collision"
+            );
+            assert_eq!(
+                std::fs::read_link(&link).unwrap(),
+                Path::new("/missing-external-definition")
+            );
             assert_eq!(runner.calls.len(), 4);
             assert_recovery_queries_only(&runner, Platform::Linux);
             assert!(!ctx.store.state_dir().exists());
@@ -1620,14 +1804,32 @@ mod tests {
             ("absent", false, true, false, None),
             ("absent", true, false, false, None),
             ("absent", true, true, false, Some("service_not_disabled")),
-            ("not running", false, false, false, Some("service_not_stopped")),
-            ("future-state", false, true, false, Some("service_not_stopped")),
+            (
+                "not running",
+                false,
+                false,
+                false,
+                Some("service_not_stopped"),
+            ),
+            (
+                "future-state",
+                false,
+                true,
+                false,
+                Some("service_not_stopped"),
+            ),
             ("not running", false, true, true, Some("native_conflict")),
         ] {
             let mut outputs = vec![native_output(true, "gui/501 = {}", "")];
             outputs.extend(launchd_observation(
-                if foreign { Path::new("/foreign.plist") } else { &definition },
-                state, None, enabled,
+                if foreign {
+                    Path::new("/foreign.plist")
+                } else {
+                    &definition
+                },
+                state,
+                None,
+                enabled,
             ));
             let mut runner = recovery_runner(outputs);
             let result = guard_recovery(&ctx, "example", removing, &mut runner);
@@ -1659,20 +1861,35 @@ mod tests {
             "schema_version":1,"operation":"add","id":"example",
             "state_dir":ctx.store.state_dir(),"native_dir":ctx.native_dir,
             "before":null,"after":record,
-        })).unwrap();
+        }))
+        .unwrap();
         std::fs::write(&journal, &bytes).unwrap();
-        let plan = ctx.store.plan_recovery(RecoveryTarget::Before).unwrap().unwrap();
+        let plan = ctx
+            .store
+            .plan_recovery(RecoveryTarget::Before)
+            .unwrap()
+            .unwrap();
         let native_before = std::fs::read(&definition).unwrap();
         let record_path = ctx.store.state_dir().join("example.toml");
         let record_before = std::fs::read(&record_path).unwrap();
         for outputs in [
-            vec![native_output(false, "token=secret-output", "password=secret-output")],
-            vec![native_output(true, "gui/501 = {}", ""), native_output(false, "secret-output", "secret-output")],
+            vec![native_output(
+                false,
+                "token=secret-output",
+                "password=secret-output",
+            )],
+            vec![
+                native_output(true, "gui/501 = {}", ""),
+                native_output(false, "secret-output", "secret-output"),
+            ],
         ] {
             let mut runner = recovery_runner(outputs);
-            let error = ctx.store.apply_recovery_checked(&plan, || {
-                guard_recovery(&ctx, &plan.id, plan.removes_definition(), &mut runner)
-            }).unwrap_err();
+            let error = ctx
+                .store
+                .apply_recovery_checked(&plan, || {
+                    guard_recovery(&ctx, &plan.id, plan.removes_definition(), &mut runner)
+                })
+                .unwrap_err();
             assert!(!error.message.contains("secret-output"));
             assert!(!error.message.contains("launchctl"));
             assert_eq!(std::fs::read(&journal).unwrap(), bytes);

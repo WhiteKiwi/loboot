@@ -21,7 +21,9 @@ use std::{
 
 #[path = "recovery.rs"]
 mod recovery;
-pub use recovery::{RECOVERY_PLAN_LIMIT, RecoveryOutcome, RecoveryPlan, RecoveryTarget, read_recovery_plan_file};
+pub use recovery::{
+    RECOVERY_PLAN_LIMIT, RecoveryOutcome, RecoveryPlan, RecoveryTarget, read_recovery_plan_file,
+};
 
 const LIMIT: u64 = 4 * 1024 * 1024;
 const JOURNAL: &str = ".pending.json";
