@@ -31,9 +31,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-24.04
+          - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
-          - os: ubuntu-24.04-arm
+          - os: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
           - os: macos-15
             target: aarch64-apple-darwin
@@ -60,6 +60,24 @@ jobs:
           if [ -n "$VERSION_TAG" ]; then args+=(--tag "$VERSION_TAG"); fi
           python3 scripts/release.py build --target "$TARGET" --output "dist/$TARGET" "${args[@]}"
           python3 scripts/release.py check --target "$TARGET" --input "dist/$TARGET" "${args[@]}"
+      - name: Verify extracted Linux archive on the native glibc 2.35 baseline
+        if: runner.os == 'Linux'
+        env:
+          TARGET: ${{ matrix.target }}
+          RUNNER_LABEL: ${{ matrix.os }}
+          EVIDENCE: ${{ runner.temp }}/loboot-linux-baseline.json
+        run: |
+          python3 scripts/linux_baseline.py --input "dist/$TARGET" --target "$TARGET" \
+            --runner-label "$RUNNER_LABEL" --report "$EVIDENCE"
+          echo 'Extracted Linux archive: glibc references <= 2.35 and native Ubuntu 22.04 offline smoke passed. Not login or kernel compatibility evidence.' >> "$GITHUB_STEP_SUMMARY"
+      - name: Preserve separate Linux baseline evidence
+        if: always() && runner.os == 'Linux'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: loboot-linux-baseline-${{ matrix.target }}
+          path: ${{ runner.temp }}/loboot-linux-baseline.json
+          if-no-files-found: warn
+          retention-days: 14
       - name: Opt-in lifecycle check on the disposable hosted runner
         env:
           EVIDENCE: ${{ runner.temp }}/loboot-native-evidence.json

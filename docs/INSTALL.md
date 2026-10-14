@@ -14,7 +14,7 @@ Use `brew upgrade loboot` to update and `brew uninstall loboot` to remove the bi
 
 ## Download a release archive
 
-Use the exact version page at [GitHub Releases](https://github.com/WhiteKiwi/loboot/releases), and download `SHA256SUMS.txt` plus the archive matching your system:
+Use the exact version page at [GitHub Releases](https://github.com/WhiteKiwi/loboot/releases), and download `SHA256SUMS.txt` plus the archive matching your system. The following table describes the immutable **published v0.1.0** archives, not unpublished builds from main:
 
 | Platform | Target | Tested build baseline |
 | --- | --- | --- |
@@ -30,6 +30,23 @@ macOS downloads are unsigned/unnotarized. If Gatekeeper blocks execution, do not
 A separate [opt-in signing preparation path](MACOS-SIGNING.md) exists for reviewed
 unpublished candidates. It does not change the trust status of v0.1.0 or offer a
 signed download. Real authorized signing/notarization evidence is still required.
+
+## Lower Linux baseline for unpublished candidates
+
+Current source packaging targets native `ubuntu-22.04` (x64) and
+`ubuntu-22.04-arm` (ARM64), with a conservative GLIBC symbol-reference ceiling of
+2.35. A passing native archive check and offline smoke on **both** Ubuntu 22.04
+runners for the exact candidate are required before treating this as verified
+build/install coverage. The [release guide](RELEASE.md#linux-candidate-baseline-unreleased)
+describes the ABI gate and separate runner/toolchain evidence.
+
+This is not a new release: existing v0.1.0 tags, archives, checksums, and Homebrew
+downloads are unchanged and retain their historical 24.04 / 2.39 tested baseline.
+A maximum symbol version, particularly a weak reference, is not by itself proof
+of a hard runtime minimum. No support for older glibc, musl, arbitrary Linux
+kernels, or real logout/login activation is inferred from either baseline.
+Source builds use the current machine's libc and do not automatically inherit
+the archive baseline.
 
 ## Requirements
 
