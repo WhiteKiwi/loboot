@@ -1565,9 +1565,7 @@ mod tests {
         first.environment.insert("SETTING".into(), "first".into());
         let stale = f.store.plan_update(&first).unwrap();
         let mut second = f.manifest.clone();
-        second
-            .environment
-            .insert("SETTING".into(), "second".into());
+        second.environment.insert("SETTING".into(), "second".into());
         f.store
             .apply(&f.store.plan_update(&second).unwrap())
             .unwrap();

@@ -1555,7 +1555,9 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             environment,
-            vec![r#"Environment="A=" "LITERAL= $HOME ${HOME} $(touch /tmp/not-executed) `id` 100%% \\ \" ' = ; & < > " "PATH=/opt/loboot-test/bin:/usr/bin" "Z=last""#]
+            vec![
+                r#"Environment="A=" "LITERAL= $HOME ${HOME} $(touch /tmp/not-executed) `id` 100%% \\ \" ' = ; & < > " "PATH=/opt/loboot-test/bin:/usr/bin" "Z=last""#
+            ]
         );
         assert!(rendered.contains("ExecStart=\":/opt/my $tool%%/run\""));
         assert!(!rendered.contains("EnvironmentFile="));
@@ -1578,7 +1580,10 @@ mod tests {
             "    <key>LITERAL</key><string>&lt;key&gt;Injected&lt;/key&gt;&amp;&quot;&apos; $HOME ${HOME} 100% \\ </string>\n",
             "    <key>Z</key><string>last</string>\n  </dict>\n",
         )));
-        assert_eq!(rendered.matches("<key>EnvironmentVariables</key>").count(), 1);
+        assert_eq!(
+            rendered.matches("<key>EnvironmentVariables</key>").count(),
+            1
+        );
         assert!(!rendered.contains("<key>Injected</key>"));
         assert!(!rendered.contains("<key>PATH</key>"));
     }
@@ -1587,10 +1592,8 @@ mod tests {
     fn environment_display_redacts_every_value_without_changing_raw_rendering() {
         let mut m = manifest();
         m.environment.insert("EMPTY".into(), String::new());
-        m.environment.insert(
-            "PATH".into(),
-            "/private-original-path/bin:/usr/bin".into(),
-        );
+        m.environment
+            .insert("PATH".into(), "/private-original-path/bin:/usr/bin".into());
         m.environment.insert(
             "TOKEN".into(),
             "private-original-value $HOME %i <tag>".into(),

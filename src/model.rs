@@ -218,7 +218,8 @@ pub fn read(path: &Path) -> Result<Manifest> {
 mod tests {
     use super::*;
 
-    const BASE_MANIFEST: &str = "id='a'\nexecutable='/usr/bin/true'\nargs=[]\ncwd='/tmp'\nmode='once'\nrestart='never'\n";
+    const BASE_MANIFEST: &str =
+        "id='a'\nexecutable='/usr/bin/true'\nargs=[]\ncwd='/tmp'\nmode='once'\nrestart='never'\n";
 
     fn manifest() -> Manifest {
         toml::from_str(BASE_MANIFEST).unwrap()
@@ -277,7 +278,13 @@ mod tests {
 
     #[test]
     fn environment_names_are_portable_and_bounded() {
-        for name in ["A", "z", "_", "_a_Z09", &"A".repeat(MAX_ENVIRONMENT_NAME_BYTES)] {
+        for name in [
+            "A",
+            "z",
+            "_",
+            "_a_Z09",
+            &"A".repeat(MAX_ENVIRONMENT_NAME_BYTES),
+        ] {
             let mut m = manifest();
             m.environment.insert(name.into(), String::new());
             assert!(m.validate_syntax().is_ok());
@@ -435,7 +442,10 @@ mod tests {
         ] {
             std::fs::write(&path, format!("{BASE_MANIFEST}{extra}")).unwrap();
             let error = read(&path).unwrap_err();
-            assert!(matches!(error.code, "invalid_manifest" | "invalid_environment"));
+            assert!(matches!(
+                error.code,
+                "invalid_manifest" | "invalid_environment"
+            ));
             assert!(!error.to_string().contains("private-parser-secret"));
             assert!(!error.to_string().contains("unknown_private_parser_secret"));
         }

@@ -280,11 +280,15 @@ fn run(cli: &Cli) -> Result<Value> {
                 .iter()
                 .map(|record| record_display(&ctx, record))
                 .collect::<Result<Vec<_>>>()?;
-            Ok(json!({"services":services,"environment_redacted":records.iter().any(|record| !record.manifest.environment.is_empty())}))
+            Ok(
+                json!({"services":services,"environment_redacted":records.iter().any(|record| !record.manifest.environment.is_empty())}),
+            )
         }
         Commands::Show { id } => {
             let record = ctx.store.read(id)?;
-            Ok(json!({"log_capture":ctx.store.log_paths(&record)?,"service":record_display(&ctx,&record)?,"environment_redacted":!record.manifest.environment.is_empty()}))
+            Ok(
+                json!({"log_capture":ctx.store.log_paths(&record)?,"service":record_display(&ctx,&record)?,"environment_redacted":!record.manifest.environment.is_empty()}),
+            )
         }
         Commands::Explain { manifest } => {
             let m = loboot::model::read(manifest)?;

@@ -746,7 +746,10 @@ fn environment_values_round_trip_but_normal_views_and_plans_are_redacted() {
             assert_eq!(snapshot(&root), before);
         }
         let noop = call_platform(&root, platform, &["update", filename, "--dry-run"]);
-        assert_eq!(value(&noop)["data"]["plan"]["changes"], serde_json::json!([]));
+        assert_eq!(
+            value(&noop)["data"]["plan"]["changes"],
+            serde_json::json!([])
+        );
         set_environment(
             &path,
             &[("APPLICATION_SETTING", "changed-private-environment-19037")],
@@ -761,10 +764,18 @@ fn environment_values_round_trip_but_normal_views_and_plans_are_redacted() {
         );
         assert_not_exposed(&changed, "changed-private-environment-19037");
         assert_eq!(snapshot(&root), before);
-        assert!(call_platform(&root, platform, &["update", filename]).status.success());
+        assert!(
+            call_platform(&root, platform, &["update", filename])
+                .status
+                .success()
+        );
         assert_eq!(stored_record(&root).log_generation, original.log_generation);
         set_environment(&path, &[]);
-        assert!(call_platform(&root, platform, &["update", filename]).status.success());
+        assert!(
+            call_platform(&root, platform, &["update", filename])
+                .status
+                .success()
+        );
         assert!(stored_record(&root).manifest.environment.is_empty());
         let shown = call_platform(&root, platform, &["show", "hello"]);
         assert_eq!(value(&shown)["data"]["environment_redacted"], false);
@@ -811,10 +822,16 @@ fn malformed_stored_environment_is_not_printed_by_diagnostics() {
     let root = base.join("invalid-state-root");
     let path = manifest(&base);
     set_environment(&path, &[("APPLICATION_SETTING", SENTINEL)]);
-    assert!(call(&root, &["add", path.to_str().unwrap()]).status.success());
+    assert!(
+        call(&root, &["add", path.to_str().unwrap()])
+            .status
+            .success()
+    );
     let record = root.join("state/hello.toml");
     let mut text = fs::read_to_string(&record).unwrap();
-    text.push_str(&format!("\n[manifest.environment]\nTOKEN = ['{SENTINEL}']\n"));
+    text.push_str(&format!(
+        "\n[manifest.environment]\nTOKEN = ['{SENTINEL}']\n"
+    ));
     fs::write(record, text).unwrap();
     let before = snapshot(&root);
     for args in [
@@ -846,7 +863,11 @@ fn recovery_environment_export_stays_exact_while_summaries_are_redacted() {
         saved["data"]["plan"]["journal"]["after"]["manifest"]["environment"]["APPLICATION_SETTING"],
         SENTINEL
     );
-    assert!(fs::read_to_string(&fixture.saved).unwrap().contains(SENTINEL));
+    assert!(
+        fs::read_to_string(&fixture.saved)
+            .unwrap()
+            .contains(SENTINEL)
+    );
     let summary = Command::new(env!("CARGO_BIN_EXE_loboot"))
         .arg("--root")
         .arg(&fixture.root)
