@@ -19,6 +19,16 @@ A pure plan reads current state, validates ownership and collision rules, and li
 
 Managed filesystem access uses descriptor-relative `openat` with `O_NOFOLLOW`, regular-file checks, atomic same-directory rename and restrictive creation modes. Symlink ancestors are refused rather than followed. The user account itself and administrators remain trusted; this is not a security boundary against another process already acting as that user.
 
+## Environment representation and public projections (unreleased)
+
+`Manifest` retains six required fields and adds an optional `BTreeMap<String, String>` environment map. A sorted map provides deterministic native rendering and equality. Empty maps are omitted from serialization, preserving the previous serialized record and native-renderer bytes for definitions without configured environment. Schema-1/schema-2 ownership validation still compares original records and native bytes; nonempty maps do not introduce a new schema, and schema 2 continues to describe log capture. Older binaries reject new nonempty environment records instead of silently dropping their configuration.
+
+Syntax validation bounds entry count, ASCII names, UTF-8 value bytes, and the total `NAME=value` plus NUL budget before rendering. Controls and Unicode noncharacters are rejected. `PATH` has an additional syntactic absolute-directory-list check, not filesystem existence/trust checks. Neither model nor renderer imports ambient shell values. Linux renders explicit per-unit environment entries; macOS uses `EnvironmentVariables`. They preserve literal values using their own native encodings, independently of shell-free argv quoting. No process-wide or manager-global environment mutation is needed.
+
+The persistence model is not the public output model. `list`, `show`, `explain`, and ordinary mutation/recovery apply/dry-run summaries use value-redacted projections. Names remain visible, and displayed native definitions containing redactions are marked non-replayable. Rendering a public preview must never overwrite the original stored bytes or turn placeholders into a new managed definition. Environment parse/validation errors must not copy raw values into error strings.
+
+The deliberate exception is the sensitive exact `recover plan --json` export: recovery compares the unmodified before/after records and native bytes under lock, so its raw evidence must retain the original values. The human `recover plan` output is a value-free summary; `--json` opts into the raw export even with `--dry-run`. Generic summary/apply output must not serialize that raw recovery model by accident. [Limits](CLI.md#environment-and-path-unreleased) and [privacy boundary](SECURITY.md#plaintext-data-and-reports).
+
 ## Native execution
 
 Every command is an executable plus argv, never a shell string. systemd quoting and launchd XML encoding are separate. Dry-run never uses Runner; unknown loaded state becomes conditional plans. Actual execution checks manager availability and current native state, revalidates ownership, executes the selected plan, then reads native state again.
@@ -29,7 +39,7 @@ macOS add disables a fresh label before exposing its LaunchAgent plist. The gene
 
 Two paths cannot be atomically committed together. Before native/record writes, store writes `.pending.json` with before and after records and exact bytes. Each file replacement is atomic; completion removes the journal after both sides agree. A crash or I/O failure preserves the journal and blocks further management.
 
-Source builds after v0.1.0 provide explicit, operator-selected recovery, not automatic repair. `recover plan --to before|after --json` reads the journal and current filesystem without writes, locks, or native queries. The default target is `before`. The report preserves exact before/after native definitions, journal/current-state evidence, and file metadata for review. A null target record means the record and native definition must both be absent. Supported records use schema 1 or 2; unknown schemas, malformed evidence, foreign bytes, drift, unsafe links, or mismatched paths are not adopted.
+Source builds after v0.1.0 provide explicit, operator-selected recovery, not automatic repair. `recover plan --to before|after --json` reads the journal and current filesystem without writes, locks, or native queries. The default target is `before`. The sensitive exact plan export preserves before/after native definitions, raw configured environment values, journal/current-state evidence, and file metadata for private review. A null target record means the record and native definition must both be absent. Supported records use schema 1 or 2; unknown schemas, malformed evidence, foreign bytes, drift, unsafe links, or mismatched paths are not adopted.
 
 `recover apply PLAN.json` accepts that unmodified saved JSON output, takes the exclusive mutation lock, and re-reads the evidence. The supplied plan must exactly match a fresh plan for the same store, platform and target before changing the pair. In live mode, read-only native checks require Linux not running or macOS unloaded; an absent target additionally requires safe disabled/no-activation state. Unavailable or ambiguous native state is not permission to proceed. Offline `--root` recovery never invokes the native manager. `recover apply --dry-run` only validates and previews, without acquiring a lock, querying native state, or writing anything.
 
@@ -41,7 +51,7 @@ Native service-manager operations cannot be rolled back transactionally. Recover
 
 ## Threat and capability limits
 
-No secrets feature; argv and paths are ordinary plaintext. No arbitrary shell evaluation, external service adoption, symlink repair, system scope, root, account changes, or lingering changes. Persistent login preference and runtime state are reported separately. Real native timing and GUI-login behavior require isolated host validation; mocks cannot establish those facts.
+No secrets feature; argv, paths, and explicit per-service environment values are ordinary plaintext. Display redaction does not hide them from native managers, child processes, or native inspection tools. No arbitrary shell evaluation, external service adoption, symlink repair, system scope, root, account changes, or lingering changes. Persistent login preference and runtime state are reported separately. Real native timing and GUI-login behavior require isolated host validation; mocks cannot establish those facts.
 
 ## Log capture boundary (unreleased)
 

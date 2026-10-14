@@ -14,6 +14,7 @@ import subprocess
 import sys
 import time
 import tempfile
+import tomllib
 import unittest
 from contextlib import redirect_stdout
 from types import SimpleNamespace
@@ -35,6 +36,19 @@ class FakeSmoke(smoke.NativeSmoke):
         self.available = True
         self.break_action = None
 
+    def write_record(self, id, manifest):
+        record = {"schema_version": 2 if self.system == "Darwin" else 1,
+                  "native_name": self.native_name(id), "native_bytes": json.dumps(manifest, ensure_ascii=False)}
+        if self.jobs[id].get("generation"):
+            record["log_generation"] = self.jobs[id]["generation"]
+        lines = [f"{key} = {json.dumps(value, ensure_ascii=False)}" for key, value in record.items()]
+        lines += ["", "[manifest]"]
+        lines += [f"{key} = {json.dumps(value, ensure_ascii=False)}" for key, value in manifest.items() if key != "environment"]
+        lines += ["", "[manifest.environment]"]
+        lines += [f"{key} = {json.dumps(value, ensure_ascii=False)}" for key, value in manifest.get("environment", {}).items()]
+        (self.state_dir / f"{id}.toml").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        (self.native_dir / self.native_name(id)).write_text(record["native_bytes"], encoding="utf-8")
+
     @staticmethod
     def pid_exists(pid):
         return False
@@ -53,8 +67,7 @@ class FakeSmoke(smoke.NativeSmoke):
             return self.error("injected_failure")
         action, id = args[:2]
         if action in ("add", "update"):
-            fields = dict(line.split(" = ", 1) for line in Path(id).read_text().splitlines())
-            manifest = {key: json.loads(value) for key, value in fields.items()}
+            manifest = tomllib.loads(Path(id).read_text(encoding="utf-8"))
             id = manifest["id"]
             if id not in self.jobs:
                 self.jobs[id] = {"enabled": False, "loaded": self.system == "Linux", "running": False, "raw": {}}
@@ -62,8 +75,6 @@ class FakeSmoke(smoke.NativeSmoke):
             self.state_dir.mkdir(parents=True, exist_ok=True)
             self.native_dir.mkdir(parents=True, exist_ok=True)
             (self.state_dir / ".lock").touch()
-            (self.state_dir / f"{id}.toml").write_text(json.dumps(manifest))
-            (self.native_dir / self.native_name(id)).write_text(json.dumps(manifest))
             if self.system == "Darwin" and "generation" not in self.jobs[id]:
                 generation = smoke.uuid.uuid4().hex
                 self.jobs[id]["generation"] = generation
@@ -75,14 +86,23 @@ class FakeSmoke(smoke.NativeSmoke):
                 directory.mkdir(mode=0o700)
                 for name, content in ((".owner", f"loboot.private-log-generation/v1\n{id}\n{generation}\n"), ("stdout.log", ""), ("stderr.log", "")):
                     file = directory / name; file.write_text(content); file.chmod(0o600)
+            self.write_record(id, manifest)
             return self.envelope({})
         if id not in self.jobs:
             return self.envelope({}) if action == "remove" else self.error("not_managed")
         job = self.jobs[id]
         if action == "show":
-            manifest = json.loads((self.state_dir / f"{id}.toml").read_text())
-            return self.envelope({"service": {"manifest": manifest, "schema_version": 2 if self.system == "Darwin" else 1,
-                                               "log_generation": job.get("generation")}})
+            try:
+                record = tomllib.loads((self.state_dir / f"{id}.toml").read_text(encoding="utf-8"))
+            except (tomllib.TOMLDecodeError, UnicodeDecodeError):
+                return self.error("invalid_state")
+            if not isinstance(record.get("manifest"), dict):
+                return self.error("invalid_state")
+            environment = record["manifest"].get("environment", {})
+            record["manifest"]["environment"] = {key: "[REDACTED]" for key in environment}
+            record["native_bytes"] = ("Environment values redacted; display only, not replayable.\n"
+                                       + json.dumps(record["manifest"], ensure_ascii=False))
+            return self.envelope({"service": record, "environment_redacted": bool(environment)})
         if action == "logs":
             size = int(args[args.index("--max-bytes") + 1]) if "--max-bytes" in args else 65536
             content = "loboot-stdout-marker\nloboot-stderr-marker token=[REDACTED]\n"[:size]
@@ -118,7 +138,8 @@ class FakeSmoke(smoke.NativeSmoke):
                 kind, marker = job["manifest"]["args"][-2:]
                 path = self.sandbox / f"{id}.jsonl"
                 with path.open("a") as file:
-                    file.write(json.dumps({"pid": 987654, "kind": kind, "marker": marker, "previous_live_pids": []}) + "\n")
+                    file.write(json.dumps({"pid": 987654, "kind": kind, "marker": marker, "previous_live_pids": [],
+                                           "environment": dict(job["manifest"].get("environment", {}))}) + "\n")
                 job["running"] = kind == "service"
                 job["loaded"] = True
                 if kind == "fail":
@@ -162,6 +183,14 @@ class NativeSmokeTests(unittest.TestCase):
 
     def guard(self, allow=True, env=None, system="Linux", uid=12345, home=None):
         return smoke.hosted_context(allow, env or self.env, system, uid, home or str(self.root))
+
+    def owned_fixture(self):
+        fake = FakeSmoke(self.root)
+        self.assertTrue(fake.preflight())
+        fake.sandbox = self.root / "sandbox"
+        fake.sandbox.mkdir()
+        id = fake.add("once")
+        return fake, id, fake.state_dir / f"{id}.toml"
 
     def test_opt_in_required_before_any_commands_or_files(self):
         with patch.object(smoke.subprocess, "run") as run, redirect_stdout(io.StringIO()):
@@ -251,6 +280,8 @@ class NativeSmokeTests(unittest.TestCase):
         self.assertFalse(fake.evidence["login_activation_verified"])
         self.assertEqual(fake.evidence["service_restart_cycles"], 3)
         self.assertEqual(fake.evidence["fixture_term_delay_seconds"], 0.75)
+        self.assertEqual(fake.evidence["checks"].count(
+            "fixture environment literals and PATH preserved on every invocation"), 3)
         self.assertTrue(any("missing-session" in item for item in fake.evidence["checks"]))
         self.assertEqual(len(run.call_args_list), 1)
         self.assertIn("reset-failed", run.call_args.args[0])
@@ -264,7 +295,77 @@ class NativeSmokeTests(unittest.TestCase):
         self.assertEqual(fake.jobs, {})
         self.assertEqual(len(fake.evidence["disabled_override_labels"]), 3)
         self.assertTrue(any("loaded-disable" in item for item in fake.evidence["checks"]))
+        self.assertEqual(fake.evidence["checks"].count(
+            "fixture environment literals and PATH preserved on every invocation"), 3)
         self.assertFalse(fake.native_dir.exists())
+
+    def test_fixture_manifest_roundtrips_literal_environment_without_changing_helper_path(self):
+        fake = FakeSmoke(self.root)
+        fake.sandbox = self.root
+        fake.env["PATH"] = "/usr/bin:/bin"
+        for marker in ("initial", "updated"):
+            path = fake.manifest("fixture", "service", marker)
+            manifest = tomllib.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(manifest["environment"], dict(smoke.FIXTURE_ENVIRONMENT,
+                                                         LOBOOT_FIXTURE_REVISION=marker))
+            self.assertTrue(all(Path(component).is_absolute()
+                                for component in manifest["environment"]["PATH"].split(":")))
+            self.assertEqual(fake.env["PATH"], "/usr/bin:/bin")
+        self.assertIn("[environment]", path.read_text())
+
+    def test_fixture_logs_only_selected_environment_and_preserves_literals(self):
+        script = self.root / "fixture.py"
+        script.write_text(smoke.FIXTURE, encoding="utf-8")
+        log = self.root / "fixture.jsonl"
+        environment = dict(os.environ, **smoke.FIXTURE_ENVIRONMENT,
+                           LOBOOT_UNRELATED_PRIVATE_VALUE="must-not-be-logged")
+        result = subprocess.run([sys.executable, str(script), str(log), "once", "initial"],
+                                env=environment, capture_output=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        event = json.loads(log.read_text())
+        self.assertEqual(event["environment"], smoke.FIXTURE_ENVIRONMENT)
+        self.assertNotIn("must-not-be-logged", log.read_text())
+        self.assertNotIn("LOBOOT_UNRELATED_PRIVATE_VALUE", log.read_text())
+
+    def test_environment_verification_rejects_missing_expanded_or_stale_values(self):
+        fake = FakeSmoke(self.root)
+        fake.sandbox = self.root
+        fake.manifest("fixture", "service", "initial")
+        fake.manifest("fixture", "service", "updated")
+        initial = dict(smoke.FIXTURE_ENVIRONMENT)
+        updated = dict(initial, LOBOOT_FIXTURE_REVISION="updated")
+        events = [{"marker": "initial", "environment": initial},
+                  {"marker": "updated", "environment": updated}]
+        with patch.object(fake, "events", return_value=events):
+            fake.verify_environment("fixture")
+        bad_events = [
+            {"marker": "initial"},
+            {"marker": "initial", "environment": dict(initial, LOBOOT_FIXTURE_DOLLARS="/runner expanded")},
+            {"marker": "initial", "environment": dict(initial, LOBOOT_FIXTURE_SPECIFIERS="fixture % /home")},
+            {"marker": "initial", "environment": dict(initial, PATH="/usr/bin:/bin")},
+            {"marker": "updated", "environment": initial},
+            {"marker": "unknown", "environment": initial},
+        ]
+        for event in bad_events:
+            with self.subTest(event=event), patch.object(fake, "events", return_value=[event]):
+                with self.assertRaisesRegex(smoke.SmokeError, "environment literals or PATH changed"):
+                    fake.verify_environment("fixture")
+
+    def test_lifecycle_fails_when_environment_probe_is_wrong(self):
+        fake = FakeSmoke(self.root)
+        original_events = fake.events
+
+        def changed_events(id):
+            events = original_events(id)
+            for event in events:
+                event["environment"]["LOBOOT_FIXTURE_DOLLARS"] = "expanded instead of literal"
+            return events
+
+        with patch.object(fake, "events", side_effect=changed_events):
+            self.assertEqual(fake.run(), 1)
+        self.assertIn("environment literals or PATH changed", fake.evidence["error"])
+        self.assertEqual(fake.evidence["cleanup_errors"], [])
+        self.assertEqual(fake.jobs, {})
 
     def test_failure_still_removes_only_owned_resources(self):
         fake = FakeSmoke(self.root)
@@ -311,6 +412,119 @@ class NativeSmokeTests(unittest.TestCase):
         self.assertEqual(fake.calls[before:], [["show", id]])
         self.assertTrue(fake.evidence["cleanup_errors"])
         self.assertTrue(fake.sandbox.exists())
+
+    def test_cleanup_uses_exact_owned_record_despite_show_redaction(self):
+        fake, id, path = self.owned_fixture()
+        show = fake.cli("show", id)
+        self.assertTrue(show["environment_redacted"])
+        self.assertEqual(set(show["service"]["manifest"]["environment"].values()), {"[REDACTED]"})
+        self.assertIn("display only, not replayable", show["service"]["native_bytes"])
+        self.assertEqual(smoke.read_owned_record(fake.home, path)["manifest"], fake.manifests[id][0])
+        fake.cleanup()
+        self.assertEqual(fake.evidence["cleanup_errors"], [])
+        self.assertEqual(fake.jobs, {})
+
+    def test_cleanup_rejects_environment_mismatch_hidden_by_identical_redaction(self):
+        fake, id, path = self.owned_fixture()
+        before_show = fake.cli("show", id)
+        changed = json.loads(json.dumps(fake.manifests[id][0]))
+        changed["environment"]["LOBOOT_FIXTURE_DOLLARS"] = "foreign literal"
+        fake.write_record(id, changed)
+        self.assertEqual(fake.cli("show", id), before_show)
+        before = len(fake.calls)
+        fake.cleanup()
+        self.assertEqual(fake.calls[before:], [["show", id]])
+        self.assertTrue(any("owned fixture record changed" in error for error in fake.evidence["cleanup_errors"]))
+        self.assertTrue(path.exists())
+        self.assertIn(id, fake.jobs)
+
+    def test_owned_record_refuses_symlinks_hardlinks_special_files_and_oversize(self):
+        fake, id, path = self.owned_fixture()
+        content = path.read_bytes()
+        outside = self.root / "outside.toml"
+        outside.write_bytes(content)
+        for kind in ("symlink", "hardlink", "directory", "fifo", "oversize"):
+            with self.subTest(kind=kind):
+                path.unlink()
+                if kind == "symlink":
+                    path.symlink_to(outside)
+                elif kind == "hardlink":
+                    os.link(outside, path)
+                elif kind == "directory":
+                    path.mkdir()
+                elif kind == "fifo":
+                    os.mkfifo(path)
+                else:
+                    with path.open("wb") as stream:
+                        stream.truncate(smoke.OWNED_RECORD_LIMIT + 1)
+                with patch.object(smoke.os, "read") as read:
+                    with self.assertRaises((smoke.SmokeError, OSError)):
+                        smoke.read_owned_record(fake.home, path)
+                    read.assert_not_called()
+                if path.is_dir() and not path.is_symlink():
+                    path.rmdir()
+                else:
+                    path.unlink()
+                path.write_bytes(content)
+        self.assertEqual(outside.read_bytes(), content)
+
+    def test_owned_record_refuses_foreign_owner_and_writable_records(self):
+        fake, id, path = self.owned_fixture()
+        real_fstat = smoke.os.fstat
+        inode = path.stat().st_ino
+
+        def foreign_owner(fd):
+            info = real_fstat(fd)
+            if info.st_ino == inode:
+                fields = {key: getattr(info, key) for key in dir(info) if key.startswith("st_")}
+                return SimpleNamespace(**dict(fields, st_uid=os.getuid() + 1))
+            return info
+
+        with patch.object(smoke.os, "fstat", side_effect=foreign_owner):
+            with self.assertRaisesRegex(smoke.SmokeError, "unsafe fixture ownership record"):
+                smoke.read_owned_record(fake.home, path)
+        path.chmod(0o666)
+        with self.assertRaisesRegex(smoke.SmokeError, "unsafe fixture ownership record"):
+            smoke.read_owned_record(fake.home, path)
+
+    def test_owned_record_refuses_symlinked_parent(self):
+        fake, id, path = self.owned_fixture()
+        moved = fake.state_dir.with_name("moved")
+        fake.state_dir.rename(moved)
+        fake.state_dir.symlink_to(moved, target_is_directory=True)
+        with self.assertRaises(OSError):
+            smoke.read_owned_record(fake.home, path)
+
+    def test_owned_record_refuses_changes_during_read(self):
+        fake, id, path = self.owned_fixture()
+        original = path.read_bytes()
+        real_read = smoke.os.read
+        for replacement in (False, True):
+            with self.subTest(replacement=replacement):
+                changed = False
+
+                def racing_read(fd, size):
+                    nonlocal changed
+                    data = real_read(fd, size)
+                    if not changed:
+                        changed = True
+                        if replacement:
+                            path.unlink()
+                        path.write_bytes(original + b" ")
+                    return data
+
+                with patch.object(smoke.os, "read", side_effect=racing_read):
+                    with self.assertRaisesRegex(smoke.SmokeError, "record changed"):
+                        smoke.read_owned_record(fake.home, path)
+                path.write_bytes(original)
+
+    def test_owned_record_refuses_invalid_toml_utf8_or_missing_manifest(self):
+        fake, id, path = self.owned_fixture()
+        for content in (b"\xff", b"not valid toml", b"schema_version = 1\n"):
+            with self.subTest(content=content):
+                path.write_bytes(content)
+                with self.assertRaises(smoke.SmokeError):
+                    smoke.read_owned_record(fake.home, path)
 
     def test_update_failure_can_cleanup_previous_owned_manifest(self):
         fake = FakeSmoke(self.root)

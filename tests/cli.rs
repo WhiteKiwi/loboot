@@ -7,16 +7,38 @@ use std::{
 use tempfile::TempDir;
 
 fn call(root: &Path, args: &[&str]) -> Output {
+    call_platform(root, "linux", args)
+}
+fn call_platform(root: &Path, platform: &str, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_loboot"))
         .arg("--json")
         .arg("--root")
         .arg(root)
         .arg("--platform")
-        .arg("linux")
+        .arg(platform)
         .args(args)
         .env("PATH", "")
         .output()
         .unwrap()
+}
+
+fn stored_record(root: &Path) -> loboot::store::Record {
+    toml::from_str(&fs::read_to_string(root.join("state/hello.toml")).unwrap()).unwrap()
+}
+
+fn set_environment(path: &Path, environment: &[(&str, &str)]) {
+    let mut manifest: loboot::model::Manifest =
+        toml::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+    manifest.environment = environment
+        .iter()
+        .map(|(name, value)| ((*name).into(), (*value).into()))
+        .collect();
+    fs::write(path, toml::to_string(&manifest).unwrap()).unwrap();
+}
+
+fn assert_not_exposed(output: &Output, sentinel: &str) {
+    assert!(!String::from_utf8_lossy(&output.stdout).contains(sentinel));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains(sentinel));
 }
 fn value(out: &Output) -> serde_json::Value {
     serde_json::from_slice(&out.stdout).unwrap_or_else(|_| {
@@ -265,13 +287,19 @@ struct RecoveryFixture {
 }
 impl RecoveryFixture {
     fn new(operation: &str) -> Self {
+        Self::with_environment(operation, None)
+    }
+    fn with_environment(operation: &str, environment: Option<&str>) -> Self {
         let temp = TempDir::new().unwrap();
         let base = temp.path().canonicalize().unwrap();
         let root = base.join("recovery-root");
         let manifest_path = manifest(&base);
+        if let Some(value) = environment {
+            set_environment(&manifest_path, &[("APPLICATION_SETTING", value)]);
+        }
         let installed = call(&root, &["add", manifest_path.to_str().unwrap()]);
         assert!(installed.status.success(), "{}", value(&installed));
-        let installed = value(&call(&root, &["show", "hello"]))["data"]["service"].clone();
+        let installed = serde_json::to_value(stored_record(&root)).unwrap();
         let (before, after) = match operation {
             "add" => {
                 // Native publication happened, but the ownership write did not.
@@ -292,7 +320,7 @@ impl RecoveryFixture {
                 .unwrap();
                 let updated = call(&root, &["update", manifest_path.to_str().unwrap()]);
                 assert!(updated.status.success(), "{}", value(&updated));
-                let after = value(&call(&root, &["show", "hello"]))["data"]["service"].clone();
+                let after = serde_json::to_value(stored_record(&root)).unwrap();
                 // Ownership is after while the native definition is still before.
                 fs::write(
                     root.join("native/loboot-hello.service"),
@@ -634,4 +662,242 @@ fn recovery_plan_input_refuses_symlinks_special_files_and_oversize_data() {
         assert_eq!(snapshot(&fixture.root), before);
         assert!(!fixture.root.join("state/.lock").exists());
     }
+}
+
+#[test]
+fn environment_values_round_trip_but_normal_views_and_plans_are_redacted() {
+    const SENTINEL: &str = "private-environment-value-19037";
+    const PRIVATE_PATH: &str = "/opt/private-environment-path-19037:/usr/bin";
+    for platform in ["linux", "macos"] {
+        let temp = TempDir::new().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let root = base.join("environment-root");
+        let path = manifest(&base);
+        set_environment(
+            &path,
+            &[
+                ("APPLICATION_SETTING", SENTINEL),
+                ("EMPTY", ""),
+                ("PATH", PRIVATE_PATH),
+            ],
+        );
+        let filename = path.to_str().unwrap();
+        let preview = call_platform(&root, platform, &["add", filename, "--dry-run"]);
+        assert!(preview.status.success(), "{}", value(&preview));
+        assert_not_exposed(&preview, SENTINEL);
+        assert_not_exposed(&preview, PRIVATE_PATH);
+        assert!(!root.exists());
+        let added = call_platform(&root, platform, &["add", filename]);
+        assert!(added.status.success(), "{}", value(&added));
+        assert_not_exposed(&added, SENTINEL);
+        let original = stored_record(&root);
+        assert_eq!(
+            original.manifest.environment["APPLICATION_SETTING"],
+            SENTINEL
+        );
+        assert_eq!(original.manifest.environment["PATH"], PRIVATE_PATH);
+        assert!(original.native_bytes.contains(SENTINEL));
+        assert_eq!(
+            fs::read_to_string(root.join("native").join(&original.native_name)).unwrap(),
+            original.native_bytes
+        );
+        let before = snapshot(&root);
+        for args in [
+            vec!["list"],
+            vec!["show", "hello"],
+            vec!["explain", filename],
+            vec!["doctor"],
+            vec!["discover"],
+            vec!["add", filename, "--dry-run"],
+            vec!["update", filename, "--dry-run"],
+            vec!["start", "hello", "--dry-run"],
+            vec!["logs", "hello", "--dry-run"],
+        ] {
+            let output = call_platform(&root, platform, &args);
+            assert!(
+                output.status.success(),
+                "{platform}/{args:?}: {}",
+                value(&output)
+            );
+            assert_not_exposed(&output, SENTINEL);
+            assert_not_exposed(&output, PRIVATE_PATH);
+            assert!(output.stderr.is_empty());
+            assert_eq!(snapshot(&root), before);
+        }
+        for args in [
+            vec!["list"],
+            vec!["show", "hello"],
+            vec!["explain", filename],
+        ] {
+            let output = call_platform(&root, platform, &args);
+            assert_eq!(value(&output)["data"]["environment_redacted"], true);
+            assert!(String::from_utf8_lossy(&output.stdout).contains("[REDACTED]"));
+            let human = Command::new(env!("CARGO_BIN_EXE_loboot"))
+                .arg("--root")
+                .arg(&root)
+                .args(["--platform", platform])
+                .args(&args)
+                .env("PATH", "")
+                .output()
+                .unwrap();
+            assert!(human.status.success());
+            assert_not_exposed(&human, SENTINEL);
+            assert_not_exposed(&human, PRIVATE_PATH);
+            assert_eq!(snapshot(&root), before);
+        }
+        let noop = call_platform(&root, platform, &["update", filename, "--dry-run"]);
+        assert_eq!(
+            value(&noop)["data"]["plan"]["changes"],
+            serde_json::json!([])
+        );
+        set_environment(
+            &path,
+            &[("APPLICATION_SETTING", "changed-private-environment-19037")],
+        );
+        let changed = call_platform(&root, platform, &["update", filename, "--dry-run"]);
+        assert!(changed.status.success(), "{}", value(&changed));
+        assert!(
+            !value(&changed)["data"]["plan"]["changes"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert_not_exposed(&changed, "changed-private-environment-19037");
+        assert_eq!(snapshot(&root), before);
+        assert!(
+            call_platform(&root, platform, &["update", filename])
+                .status
+                .success()
+        );
+        assert_eq!(stored_record(&root).log_generation, original.log_generation);
+        set_environment(&path, &[]);
+        assert!(
+            call_platform(&root, platform, &["update", filename])
+                .status
+                .success()
+        );
+        assert!(stored_record(&root).manifest.environment.is_empty());
+        let shown = call_platform(&root, platform, &["show", "hello"]);
+        assert_eq!(value(&shown)["data"]["environment_redacted"], false);
+        assert!(
+            value(&shown)["data"]["service"]["manifest"]
+                .get("environment")
+                .is_none()
+        );
+    }
+}
+
+#[test]
+fn malformed_environment_errors_never_echo_values_or_write_state() {
+    const SENTINEL: &str = "private-invalid-environment-28051";
+    let temp = TempDir::new().unwrap();
+    let base = temp.path().canonicalize().unwrap();
+    let root = base.join("invalid-environment-root");
+    let path = manifest(&base);
+    let original = fs::read_to_string(&path).unwrap();
+    for suffix in [
+        format!("[environment]\nTOKEN = ['{SENTINEL}']\n"),
+        format!("[environment]\nTOKEN = '{SENTINEL}\n"),
+        format!("[environment]\nTOKEN = '{SENTINEL}'\nTOKEN = 'duplicate'\n"),
+        format!("[environment]\n'{SENTINEL}' = '{SENTINEL}'\n"),
+        format!("[environment]\nPATH = '{SENTINEL}'\n"),
+        format!("[environment]\nTOKEN = \"{SENTINEL}\\n\"\n"),
+    ] {
+        fs::write(&path, format!("{original}{suffix}")).unwrap();
+        for command in ["add", "explain"] {
+            let output = call(&root, &[command, path.to_str().unwrap()]);
+            assert!(!output.status.success());
+            assert_not_exposed(&output, SENTINEL);
+            assert!(output.stderr.is_empty());
+            assert!(!root.exists());
+        }
+    }
+}
+
+#[test]
+fn malformed_stored_environment_is_not_printed_by_diagnostics() {
+    const SENTINEL: &str = "private-invalid-state-90217";
+    let temp = TempDir::new().unwrap();
+    let base = temp.path().canonicalize().unwrap();
+    let root = base.join("invalid-state-root");
+    let path = manifest(&base);
+    set_environment(&path, &[("APPLICATION_SETTING", SENTINEL)]);
+    assert!(
+        call(&root, &["add", path.to_str().unwrap()])
+            .status
+            .success()
+    );
+    let record = root.join("state/hello.toml");
+    let mut text = fs::read_to_string(&record).unwrap();
+    text.push_str(&format!(
+        "\n[manifest.environment]\nTOKEN = ['{SENTINEL}']\n"
+    ));
+    fs::write(record, text).unwrap();
+    let before = snapshot(&root);
+    for args in [
+        vec!["list"],
+        vec!["show", "hello"],
+        vec!["doctor"],
+        vec!["update", path.to_str().unwrap(), "--dry-run"],
+    ] {
+        let output = call(&root, &args);
+        assert_not_exposed(&output, SENTINEL);
+        assert!(output.stderr.is_empty());
+        let result = value(&output);
+        if args[0] == "doctor" {
+            assert_eq!(result["data"]["state"]["code"], "invalid_state");
+        } else {
+            assert_eq!(result["error"]["code"], "invalid_state");
+        }
+        assert_eq!(snapshot(&root), before);
+    }
+}
+
+#[test]
+fn recovery_environment_export_stays_exact_while_summaries_are_redacted() {
+    const SENTINEL: &str = "private-recovery-environment-37901";
+    let fixture = RecoveryFixture::with_environment("update", Some(SENTINEL));
+    let before = snapshot(&fixture.root);
+    let saved = fixture.save_plan("after");
+    assert_eq!(
+        saved["data"]["plan"]["journal"]["after"]["manifest"]["environment"]["APPLICATION_SETTING"],
+        SENTINEL
+    );
+    assert!(
+        fs::read_to_string(&fixture.saved)
+            .unwrap()
+            .contains(SENTINEL)
+    );
+    let summary = Command::new(env!("CARGO_BIN_EXE_loboot"))
+        .arg("--root")
+        .arg(&fixture.root)
+        .args([
+            "--platform",
+            "linux",
+            "recover",
+            "plan",
+            "--to",
+            "after",
+            "--dry-run",
+        ])
+        .env("PATH", "")
+        .output()
+        .unwrap();
+    assert!(summary.status.success());
+    assert_not_exposed(&summary, SENTINEL);
+    let summary: serde_json::Value = serde_json::from_slice(&summary.stdout).unwrap();
+    assert_eq!(summary["plan"]["id"], "hello");
+    assert!(summary["plan"].get("journal").is_none());
+    let dry = fixture.apply(true);
+    assert!(dry.status.success(), "{}", value(&dry));
+    assert_not_exposed(&dry, SENTINEL);
+    assert_eq!(snapshot(&fixture.root), before);
+    let applied = fixture.apply(false);
+    assert!(applied.status.success(), "{}", value(&applied));
+    assert_not_exposed(&applied, SENTINEL);
+    assert_eq!(
+        stored_record(&fixture.root).manifest.environment["APPLICATION_SETTING"],
+        SENTINEL
+    );
+    assert_not_exposed(&call(&fixture.root, &["show", "hello"]), SENTINEL);
 }

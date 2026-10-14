@@ -117,7 +117,9 @@ loboot add worker.toml --dry-run --json
 loboot add worker.toml
 ```
 
-Modes: `once` or `service`. Restart policies: `never`, `on-failure`, or `always`; `once` requires `never`. Arguments are literal, and the current physical directory is the default working directory for command-based definitions. Unknown fields, environment/secret configuration, relative executable/cwd paths, and symlinked paths are rejected. [Full CLI contract →](docs/CLI.md)
+Modes: `once` or `service`. Restart policies: `never`, `on-failure`, or `always`; `once` requires `never`. Arguments are literal, and the current physical directory is the default working directory for command-based definitions. Unknown fields, secret-store configuration, relative executable/cwd paths, and symlinked paths are rejected. The six fields above remain required.
+
+**Unreleased environment support:** source builds with this feature also accept an optional `[environment]` table for bounded, literal, non-secret string values. There is no direct `--env` flag or shell-environment import. An omitted `PATH` leaves the native manager's default unchanged; an explicit `PATH` replaces it completely with absolute directories. Neither choice changes the required absolute executable or expands `$VARIABLE` / `~` in argv. Published v0.1.0 binaries reject this table. [Node and Python examples, privacy and PATH rules →](docs/OPERATOR.md#environment-and-path-unreleased) · [Full CLI contract →](docs/CLI.md)
 
 ## Native by design
 
@@ -133,7 +135,7 @@ Modes: `once` or `service`. Restart policies: `never`, `on-failure`, or `always`
 
 ¹ Enable before start/restart; stop before disabling a loaded job.
 
-**Unreleased source on main:** bounded `logs`, failure diagnostics, and explicit `recover plan` / `recover apply` are available in source builds. Published v0.1.0 binaries are unchanged and do not contain them. New macOS definitions capture stdout/stderr privately; existing definitions require an explicit stopped update. Recovery restores only a verified filesystem pair, never native runtime/preferences or log contents. [Logging, limits and retention](docs/OPERATOR.md#logs) · [Safe recovery](docs/TROUBLESHOOTING.md#interrupted-filesystem-change).
+**Unreleased source features:** bounded `logs`, failure diagnostics, explicit `recover plan` / `recover apply`, and manifest environment/PATH configuration are source-build features, not additions to the immutable published v0.1.0 binaries. Check that your source revision contains the feature you intend to use. New macOS definitions capture stdout/stderr privately; existing definitions require an explicit stopped update. Recovery restores only a verified filesystem pair, never native runtime/preferences or log contents. [Logging, limits and retention](docs/OPERATOR.md#logs) · [Safe recovery](docs/TROUBLESHOOTING.md#interrupted-filesystem-change).
 
 **Current scope:** user-account services on macOS and Linux. Windows, system/boot scope, secrets, external-service adoption, and automatic recovery are deferred or out of scope. See [implementation status](docs/IMPLEMENTATION.md) for the verification boundary.
 
@@ -142,7 +144,7 @@ Modes: `once` or `service`. Restart policies: `never`, `on-failure`, or `always`
 
 - Check both the JSON `ok` field and exit status; `doctor` also needs its nested state/session diagnostics checked.
 - Native failures may follow partially successful commands. Inspect status before retrying; accepted commands do not prove a process remains running.
-- Arguments and paths are plaintext. Do not put credentials in them. loboot does not sandbox the program you run.
+- Arguments, paths, and configured environment values are stored in plaintext. Do not put credentials in them. Routine inspection redacts configured environment values, but exact recovery exports, native tools, and application logs can reveal them. loboot is not a secret store and does not sandbox the program you run.
 - Filesystem updates are journaled; manager actions are not transactional. Use a private saved recovery plan and explicit apply in source builds, following the [recovery procedure](docs/TROUBLESHOOTING.md#interrupted-filesystem-change). Keep raw plans private and never delete a journal blindly or force-adopt drifted files.
 
 </details>

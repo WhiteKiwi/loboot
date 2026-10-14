@@ -12,7 +12,8 @@ Do not retry a mutating command blindly after a native failure. Some steps may a
 | `offline_only` | `--root` intentionally disables live status/runtime actions. Use `--dry-run` for plans, or omit `--root` only when you intend to operate on real account services. |
 | `usage` | Check `loboot COMMAND --help`. `--platform` needs `--root`; creation options belong to direct argv `add`, while a TOML file carries its own settings. |
 | `invalid_id` | Use lowercase ASCII IDs matching `[a-z][a-z0-9-]{0,62}`. |
-| `invalid_manifest`, `invalid_restart` | Supply all six known manifest fields. `once` requires `never`; environment/secret fields are not supported. |
+| `invalid_manifest`, `invalid_restart` | Supply all six required manifest fields. `once` requires `never`; unknown fields and non-string environment values are errors. `[environment]` requires a source build with that unreleased feature, not published v0.1.0. |
+| `invalid_environment` | Check environment entry/name/value/aggregate limits, forbidden value characters, and absolute complete `PATH` syntax. The error deliberately does not quote raw values; inspect your private original manifest. |
 | `invalid_path`, `unsafe_or_inaccessible_path`, `unsafe_or_inaccessible_file` | Check permissions, absolute physical paths, and every symlink ancestor. On macOS use `/private/tmp`, not `/tmp`. Do not replace unrelated symlinks just to make a command pass. |
 | `missing_file`, `invalid_executable`, `invalid_cwd` | The input/executable/directory must exist; the executable must be a regular file with executable permissions. |
 | `unsupported_executable_path` | Linux's native parser cannot accept quotes, backslashes, or glob metacharacters in the executable pathname. Choose a suitable real executable path. Ordinary arguments have separate escaping. |
@@ -26,6 +27,21 @@ Do not retry a mutating command blindly after a native failure. Some steps may a
 | `no_pending_recovery` | No journal remains for the supplied plan. A completed replay makes no changes; run `recover plan --json` to inspect current pending state rather than recreating the journal. |
 | `status_required`, `status_unavailable`, `native_output` | Native observations are incomplete or unrecognized. Retain sanitized raw output; unknown is not stopped/disabled. |
 | `unsupported_capability` | The requested backend capability is unavailable; inspect the command and platform. |
+
+## Environment and PATH problems (unreleased)
+
+If a manifest is rejected, first check the exact binary/source revision. Published v0.1.0 rejects `[environment]`; pre-feature binaries also reject new nonempty environment records. Do not remove the table from a stored record, copy a redacted preview over a native file, or forge ownership to make a downgrade work. Omitted/empty maps preserve old exact rendering; schema-2 log capture is a separate compatibility boundary.
+
+For a supported source build, check all six required fields and the optional environment table: names must match `[A-Za-z_][A-Za-z0-9_]*` and fit 128 ASCII bytes; values must be strings of at most 4096 UTF-8 bytes without controls or Unicode noncharacters. The map is limited to 64 entries and 32768 aggregate bytes, including each name, value, `=` and NUL. The diagnostic deliberately does not echo the offending values; inspect your private original manifest, not a shareable report.
+
+If an application works in your terminal but not as a service:
+
+1. Check the absolute executable and cwd first. loboot never resolves the service executable through the configured `PATH`; a symlinked interpreter/version-manager launcher is still refused.
+2. Check required **non-secret** application variables explicitly in `[environment]`. The invoking shell environment and its startup/activation scripts are not imported. No `--env` flag, `$VARIABLE` expansion, or virtualenv activation is provided.
+3. With omitted `PATH`, expect native-manager defaults, not your terminal's path. With explicit `PATH`, provide the complete list of intended absolute directories. Empty entries, relative paths, `.` and `..` are invalid; `$PATH:/extra/bin` is not an append mechanism. Syntax validation does not verify directory existence, trust, or command availability.
+4. Inspect bounded application output privately. `list`/`show`/`explain` redaction is intentional; it does not mean the native manager received the word used as the redaction marker. Native tools and application output may reveal original values, so sanitize reports before sharing.
+
+Change configuration through a stopped `update` with the original manifest. Environment changes never imply an automatic restart. Keep exact recovery exports private: their raw values are required for equality revalidation, while ordinary apply/dry-run summaries do not expose them.
 
 ## Native partial progress
 
@@ -46,7 +62,7 @@ launchctl print "gui/$(id -u)/com.loboot.worker"
 launchctl print-disabled "gui/$(id -u)"
 ```
 
-A nonzero native status result can mean an inactive/missing job; inspect its content. Do not treat every error as proof of absence. loboot's `status` also requires readable managed state and cannot bypass a pending journal.
+These native tools can reveal environment values and application output; review them privately and redact any report before sharing. A nonzero native status result can mean an inactive/missing job; inspect its content. Do not treat every error as proof of absence. loboot's `status` also requires readable managed state and cannot bypass a pending journal.
 
 ## Interrupted filesystem change
 
@@ -63,7 +79,7 @@ A nonzero native status result can mean an inactive/missing job; inspect its con
    loboot recover plan --to before --json > recovery.json
    ```
 
-   For `after`, request a separate new plan with `--to after`; never edit a saved plan. Check the exit status and `ok` before using its output. A plan without a journal reports `pending: false`; there is nothing to apply. `umask` does not tighten an existing file's permissions, so use a new filename and verify mode 0600. Plans contain exact raw definitions, argv, paths, journal/current-state evidence and file metadata, not sanitized diagnostics. Never share a raw plan.
+   For `after`, request a separate new plan with `--to after`; never edit a saved plan. Check the exit status and `ok` before using its output. A plan without a journal reports `pending: false`; there is nothing to apply. `umask` does not tighten an existing file's permissions, so use a new filename and verify mode 0600. Plans are explicitly sensitive exports containing exact raw definitions, configured environment values, argv, paths, journal/current-state evidence and file metadata, not sanitized diagnostics. Never share a raw plan. Without `--json`, `recover plan` returns a value-free summary, not an apply input. Adding `--dry-run` to a JSON export does not redact it.
 4. Review the account, root/platform, paths, ID, operation, target, before/after definitions, and current snapshot. Both schemas 1 and 2 are supported, but unknown/malformed data, foreign or drifted bytes, unsafe links, and stale snapshots are refused. If neither outcome can be verified safely, preserve everything and seek review; there is no force option.
 5. Preview the unmodified saved plan, then apply only when its target is what you intend:
 
@@ -71,7 +87,7 @@ A nonzero native status result can mean an inactive/missing job; inspect its con
    loboot recover apply recovery.json --dry-run --json
    ```
 
-   The preview performs no writes, locking, or native queries. It does not verify live stopped/disabled preconditions. Once reviewed:
+   The preview performs no writes, locking, or native queries. Its summary does not echo raw configured environment values, but the saved input plan remains sensitive. It does not verify live stopped/disabled preconditions. Once reviewed:
 
    ```sh
    loboot recover apply recovery.json --json

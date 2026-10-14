@@ -1,0 +1,18 @@
+# Unreleased environment support: published v0.1.0 rejects this table.
+# Replace all /opt paths with actual absolute, non-symlinked paths for your account.
+# Use the intended physical Python executable. Virtualenv/version-manager
+# launchers may be symlinks and are subject to the same path checks.
+id = "python-worker"
+executable = "/opt/python/bin/python3"
+args = ["/opt/python-worker/worker.py"]
+cwd = "/opt/python-worker"
+mode = "service"
+restart = "on-failure"
+
+# Non-secret configuration only; values are stored in plaintext, not encrypted.
+# This does not source an activation script or expand variables in argv.
+[environment]
+APP_MODE = "production"
+PYTHONUNBUFFERED = "1"
+# PATH is intentionally omitted: the native manager's default remains in effect,
+# not the invoking terminal's PATH. The service executable is always absolute.

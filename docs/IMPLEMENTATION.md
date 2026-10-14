@@ -50,6 +50,18 @@ Acceptance coverage must distinguish these boundaries:
 
 This section records the implementation contract and required acceptance scope, **not results of an executed check**. Exact-revision results belong with the change's validation evidence. Historical v0.1.0 checks below do not verify these unreleased commands; native logout/login acceptance remains pending.
 
+## Environment contract and acceptance (unreleased)
+
+[Issue #12](https://github.com/WhiteKiwi/loboot/issues/12) adds optional bounded per-service environment strings and explicit complete `PATH` overrides. The required acceptance scope is:
+
+- Deterministic sorted literal native rendering on Linux/macOS, including spaces, quotes, backslashes, dollar/percent signs, equals signs, empty values and non-ASCII UTF-8. Configured values must not trigger variable/specifier/shell expansion.
+- Exact name/value/count/aggregate boundaries, control and Unicode-noncharacter rejection, non-string TOML rejection, and syntax-only `PATH` rules without ambient shell import or manager-global changes.
+- Omitted/empty-map byte compatibility for old definitions and stored schemas 1/2; explicit stopped updates for configuration changes. Schema-2 capture remains separate.
+- Redacted public list/show/explain/native previews and ordinary plan/apply/dry-run/error output, while stored native/record/journal evidence remains exact. Recovery exports retain sensitive raw values for equality checks; redaction is not a secret-store claim.
+- Read-only/offline refusal and success paths, pure-renderer/fake-runner checks, and subprocess output-leakage regressions. No default test may call a real native manager or register a service.
+
+This is the feature contract and required acceptance scope, **not an assertion that these checks ran or passed**. Revision-specific local/hosted results must be recorded separately. Existing v0.1.0 lifecycle evidence does not establish native environment behavior, and real logout/login acceptance remains pending.
+
 ## Recorded verification evidence
 
 Cloud Linux, Rust 1.99.0: formatting check and Clippy with warnings denied pass; 46 tests pass (37 library, 2 CLI-unit, 7 subprocess integration). These tests include both native planners through fakes and Linux/macOS offline CLI flows. A generated macOS plist also parses with Python's plistlib and preserves literal argv.

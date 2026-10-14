@@ -616,6 +616,7 @@ mod tests {
                 cwd: root.clone(),
                 mode: Mode::Service,
                 restart: Restart::Never,
+                environment: Default::default(),
             };
             let before = if operation == "add" {
                 None

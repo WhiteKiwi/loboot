@@ -274,16 +274,28 @@ fn run(cli: &Cli) -> Result<Value> {
                 json!({"applied":plan,"retained_logs":retained_logs,"note":"Definition removed. No process was stopped implicitly; captured logs are retained for deliberate private cleanup."}),
             )
         }
-        Commands::List => Ok(json!({"services":ctx.store.list()?})),
+        Commands::List => {
+            let records = ctx.store.list()?;
+            let services = records
+                .iter()
+                .map(|record| record_display(&ctx, record))
+                .collect::<Result<Vec<_>>>()?;
+            Ok(
+                json!({"services":services,"environment_redacted":records.iter().any(|record| !record.manifest.environment.is_empty())}),
+            )
+        }
         Commands::Show { id } => {
             let record = ctx.store.read(id)?;
-            Ok(json!({"log_capture":ctx.store.log_paths(&record)?,"service":record}))
+            Ok(
+                json!({"log_capture":ctx.store.log_paths(&record)?,"service":record_display(&ctx,&record)?,"environment_redacted":!record.manifest.environment.is_empty()}),
+            )
         }
         Commands::Explain { manifest } => {
             let m = loboot::model::read(manifest)?;
             let preview = ctx.store.preview(&m)?;
+            let display = record_display(&ctx, &preview)?;
             Ok(
-                json!({"manifest":m,"platform":ctx.platform,"native_definition":preview.native_bytes,"log_capture":ctx.store.log_paths(&preview)?,"login_scope":"user manager activation; not every simultaneous login","capabilities":capabilities(ctx.platform)}),
+                json!({"manifest":manifest_display(&m),"platform":ctx.platform,"native_definition":display["native_bytes"],"environment_redacted":!m.environment.is_empty(),"log_capture":ctx.store.log_paths(&preview)?,"login_scope":"user manager activation; not every simultaneous login","capabilities":capabilities(ctx.platform)}),
             )
         }
         Commands::Discover => discover(&ctx.native_dir, &ctx.store),
@@ -357,6 +369,39 @@ fn run(cli: &Cli) -> Result<Value> {
     }
 }
 
+/// Display projections never replace the exact values used by storage or by an
+/// explicit private recovery export. Redacted native bytes are not replay data.
+fn manifest_display(manifest: &loboot::model::Manifest) -> Value {
+    let mut display = json!(manifest);
+    if !manifest.environment.is_empty() {
+        let environment: serde_json::Map<String, Value> = manifest
+            .environment
+            .keys()
+            .map(|name| (name.clone(), json!("[REDACTED]")))
+            .collect();
+        display["environment"] = Value::Object(environment);
+    }
+    display
+}
+
+fn record_display(ctx: &Context, record: &loboot::store::Record) -> Result<Value> {
+    let mut display = json!(record);
+    if !record.manifest.environment.is_empty() {
+        display["manifest"] = manifest_display(&record.manifest);
+        let definition = if let Some(paths) = ctx.store.log_paths(record)? {
+            ctx.platform.render_with_logs_redacted(
+                &record.manifest,
+                &paths.stdout,
+                &paths.stderr,
+            )?
+        } else {
+            ctx.platform.render_redacted(&record.manifest)?
+        };
+        display["native_bytes"] = json!(definition);
+    }
+    Ok(display)
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SavedRecoveryResponse {
@@ -396,7 +441,16 @@ fn recover(cli: &Cli, ctx: &Context, command: &RecoveryCommands) -> Result<Value
                 RecoveryDestination::After => RecoveryTarget::After,
             };
             let plan = ctx.store.plan_recovery(target)?;
-            Ok(json!({"pending":plan.is_some(),"plan":plan}))
+            if cli.json {
+                // This explicitly requested private export is exact replay data,
+                // not an ordinary diagnostic. Never redact its internal values.
+                Ok(json!({"pending":plan.is_some(),"plan":plan}))
+            } else {
+                let summary = plan.as_ref().map(|plan| {
+                    json!({"id":plan.id,"target":plan.target,"changes":plan.changes,"note":"Summary only. Use recover plan --json to save an exact private recovery export; that export contains plaintext definitions and environment values."})
+                });
+                Ok(json!({"pending":plan.is_some(),"plan":summary}))
+            }
         }
         RecoveryCommands::Apply { plan } => {
             let plan = parse_recovery_response(&read_recovery_plan_file(plan)?)?;
@@ -575,6 +629,7 @@ fn input_manifest(command: &Commands, path: &Path) -> Result<loboot::model::Mani
                     RestartPolicy::OnFailure => Restart::OnFailure,
                     RestartPolicy::Always => Restart::Always,
                 },
+                environment: Default::default(),
             };
             m.validate()?;
             return Ok(m);
@@ -969,6 +1024,7 @@ mod tests {
             cwd: root,
             mode: loboot::model::Mode::Once,
             restart: loboot::model::Restart::Never,
+            environment: Default::default(),
         };
         store
             .apply_checked(&store.plan_add(&manifest).unwrap(), || Ok(()))
