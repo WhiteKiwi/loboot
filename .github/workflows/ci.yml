@@ -7,8 +7,8 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
 jobs:
   quality:
     name: Format, lint, and release-script tests / Rust 1.99.0
@@ -32,6 +32,7 @@ jobs:
     timeout-minutes: 20
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix:
         include:
           - os: ubuntu-24.04
@@ -49,8 +50,10 @@ jobs:
           persist-credentials: false
       - run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
       - run: rustc -vV
-      - run: cargo test --locked --all-targets
-      - run: cargo build --locked --release
+      - name: Unit and offline native-contract tests
+        run: cargo test --locked --all-targets -- --test-threads=1
+      - name: Build the release executable
+        run: cargo build --locked --release
       - name: Safe binary smoke test
         run: |
           target/release/loboot --version

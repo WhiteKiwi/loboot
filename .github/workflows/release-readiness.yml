@@ -29,6 +29,7 @@ jobs:
     timeout-minutes: 25
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix:
         include:
           - os: ubuntu-22.04
@@ -49,7 +50,7 @@ jobs:
           python-version: '3.12'
       - run: rustup toolchain install 1.99.0 --profile minimal
       - run: rustc -vV
-      - run: cargo test --locked --all-targets
+      - run: cargo test --locked --all-targets -- --test-threads=1
       - run: cargo build --locked --release
       - name: Archive and verify without invoking a native service manager
         env:
