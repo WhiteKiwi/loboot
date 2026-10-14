@@ -288,9 +288,29 @@ impl Platform {
     }
 
     pub fn render(&self, manifest: &Manifest) -> Result<String> {
+        self.render_internal(manifest, false)
+    }
+
+    /// A display-only definition. Validate the original values, including PATH,
+    /// before hiding them; a redaction placeholder is never a manifest value.
+    pub fn render_redacted(&self, manifest: &Manifest) -> Result<String> {
+        self.render_internal(manifest, true)
+    }
+
+    fn render_internal(&self, manifest: &Manifest, redacted: bool) -> Result<String> {
         manifest.validate_syntax()?;
         let executable = utf8_path(&manifest.executable)?;
         let cwd = utf8_path(&manifest.cwd)?;
+        let redaction_notice = if redacted && !manifest.environment.is_empty() {
+            match self {
+                Self::Linux => "# Environment values redacted; display only, not replayable.\n",
+                Self::Macos => {
+                    "<!-- Environment values redacted; display only, not replayable. -->\n"
+                }
+            }
+        } else {
+            ""
+        };
         match self {
             Self::Linux => {
                 // systemd validates the decoded executable with string_is_safe;
@@ -314,8 +334,23 @@ impl Platform {
                 // argv, including argv[0]. It is parsed after native unquoting.
                 let mut argv = vec![systemd_quote(&format!(":{executable}"))];
                 argv.extend(manifest.args.iter().map(|s| systemd_quote(s)));
+                let environment = if manifest.environment.is_empty() {
+                    String::new()
+                } else {
+                    let assignments = manifest
+                        .environment
+                        .iter()
+                        .map(|(name, value)| {
+                            let value = if redacted { "[REDACTED]" } else { value };
+                            systemd_quote(&format!("{name}={value}"))
+                        })
+                        .collect::<Vec<_>>();
+                    // Environment= does not expand '$'; specifiers still require
+                    // '%%'. Quote the entire assignment, not only its value.
+                    format!("Environment={}\n", assignments.join(" "))
+                };
                 Ok(format!(
-                    "# Managed by loboot; do not edit.\n[Unit]\nDescription=loboot {}\n\n[Service]\nType={kind}\nExecStart={}\nWorkingDirectory={}\nRestart={restart}\nRestartSec=2s\n\n[Install]\nWantedBy=default.target\n",
+                    "# Managed by loboot; do not edit.\n{redaction_notice}[Unit]\nDescription=loboot {}\n\n[Service]\nType={kind}\nExecStart={}\nWorkingDirectory={}\n{environment}Restart={restart}\nRestartSec=2s\n\n[Install]\nWantedBy=default.target\n",
                     manifest.id,
                     argv.join(" "),
                     systemd_directory(cwd)
@@ -331,8 +366,21 @@ impl Platform {
                     Restart::OnFailure => "<dict><key>SuccessfulExit</key><false/></dict>",
                     Restart::Always => "<true/>",
                 };
+                let mut environment = String::new();
+                if !manifest.environment.is_empty() {
+                    environment.push_str("  <key>EnvironmentVariables</key>\n  <dict>\n");
+                    for (name, value) in &manifest.environment {
+                        let value = if redacted { "[REDACTED]" } else { value };
+                        environment.push_str(&format!(
+                            "    <key>{}</key><string>{}</string>\n",
+                            xml(name)?,
+                            xml(value)?,
+                        ));
+                    }
+                    environment.push_str("  </dict>\n");
+                }
                 Ok(format!(
-                    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<!-- Managed by loboot; do not edit. -->\n<plist version=\"1.0\">\n<dict>\n  <key>Label</key><string>{}</string>\n  <key>ProgramArguments</key>\n  <array>\n{args}  </array>\n  <key>WorkingDirectory</key><string>{}</string>\n  <key>Disabled</key><true/>\n  <key>RunAtLoad</key><true/>\n  <key>KeepAlive</key>{keepalive}\n  <key>ThrottleInterval</key><integer>2</integer>\n</dict>\n</plist>\n",
+                    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<!-- Managed by loboot; do not edit. -->\n{redaction_notice}<plist version=\"1.0\">\n<dict>\n  <key>Label</key><string>{}</string>\n  <key>ProgramArguments</key>\n  <array>\n{args}  </array>\n  <key>WorkingDirectory</key><string>{}</string>\n{environment}  <key>Disabled</key><true/>\n  <key>RunAtLoad</key><true/>\n  <key>KeepAlive</key>{keepalive}\n  <key>ThrottleInterval</key><integer>2</integer>\n</dict>\n</plist>\n",
                     self.label(&manifest.id),
                     xml(cwd)?
                 ))
@@ -347,7 +395,27 @@ impl Platform {
         stdout_path: &Path,
         stderr_path: &Path,
     ) -> Result<String> {
-        let rendered = self.render(manifest)?;
+        self.render_with_logs_internal(manifest, stdout_path, stderr_path, false)
+    }
+
+    /// Display-only schema-2 rendering with original environment validation.
+    pub fn render_with_logs_redacted(
+        &self,
+        manifest: &Manifest,
+        stdout_path: &Path,
+        stderr_path: &Path,
+    ) -> Result<String> {
+        self.render_with_logs_internal(manifest, stdout_path, stderr_path, true)
+    }
+
+    fn render_with_logs_internal(
+        &self,
+        manifest: &Manifest,
+        stdout_path: &Path,
+        stderr_path: &Path,
+        redacted: bool,
+    ) -> Result<String> {
+        let rendered = self.render_internal(manifest, redacted)?;
         if *self == Self::Linux {
             return Ok(rendered);
         }
@@ -887,7 +955,8 @@ fn launchctl(args: &[&str]) -> CommandSpec {
     }
 }
 
-/// Native argv C escapes and specifiers. The command prefix disables dollar expansion.
+/// Native C escapes and specifiers for argv and whole environment assignments.
+/// ExecStart's command prefix disables dollar expansion; Environment= is literal.
 fn systemd_quote(value: &str) -> String {
     let mut result = String::from("\"");
     for ch in value.chars() {
@@ -1421,8 +1490,177 @@ mod tests {
             cwd: "/tmp/a $b%".into(),
             mode: Mode::Once,
             restart: Restart::Never,
+            environment: BTreeMap::new(),
         }
     }
+
+    #[test]
+    fn empty_environment_preserves_historical_native_bytes() {
+        let mut m = manifest();
+        m.executable = "/usr/bin/true".into();
+        m.args.clear();
+        m.cwd = "/tmp".into();
+        let linux = concat!(
+            "# Managed by loboot; do not edit.\n",
+            "[Unit]\nDescription=loboot example\n\n",
+            "[Service]\nType=oneshot\nExecStart=\":/usr/bin/true\"\n",
+            "WorkingDirectory=/tmp/\nRestart=no\nRestartSec=2s\n\n",
+            "[Install]\nWantedBy=default.target\n",
+        );
+        let macos = concat!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n",
+            "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" ",
+            "\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n",
+            "<!-- Managed by loboot; do not edit. -->\n",
+            "<plist version=\"1.0\">\n<dict>\n",
+            "  <key>Label</key><string>com.loboot.example</string>\n",
+            "  <key>ProgramArguments</key>\n  <array>\n",
+            "    <string>/usr/bin/true</string>\n  </array>\n",
+            "  <key>WorkingDirectory</key><string>/tmp</string>\n",
+            "  <key>Disabled</key><true/>\n",
+            "  <key>RunAtLoad</key><true/>\n",
+            "  <key>KeepAlive</key><false/>\n",
+            "  <key>ThrottleInterval</key><integer>2</integer>\n",
+            "</dict>\n</plist>\n",
+        );
+        for (platform, expected) in [(Platform::Linux, linux), (Platform::Macos, macos)] {
+            assert_eq!(platform.render(&m).unwrap(), expected);
+            assert_eq!(platform.render_redacted(&m).unwrap(), expected);
+            let stdout = Path::new("/private/logs/stdout");
+            let stderr = Path::new("/private/logs/stderr");
+            assert_eq!(
+                platform.render_with_logs(&m, stdout, stderr).unwrap(),
+                platform
+                    .render_with_logs_redacted(&m, stdout, stderr)
+                    .unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn systemd_environment_is_sorted_quoted_and_literal() {
+        let mut m = manifest();
+        m.environment.insert("Z".into(), "last".into());
+        m.environment.insert(
+            "LITERAL".into(),
+            r#" $HOME ${HOME} $(touch /tmp/not-executed) `id` 100% \ " ' = ; & < > "#.into(),
+        );
+        m.environment.insert("A".into(), String::new());
+        m.environment
+            .insert("PATH".into(), "/opt/loboot-test/bin:/usr/bin".into());
+        let rendered = Platform::Linux.render(&m).unwrap();
+        let environment = rendered
+            .lines()
+            .filter(|line| line.starts_with("Environment="))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            environment,
+            vec![r#"Environment="A=" "LITERAL= $HOME ${HOME} $(touch /tmp/not-executed) `id` 100%% \\ \" ' = ; & < > " "PATH=/opt/loboot-test/bin:/usr/bin" "Z=last""#]
+        );
+        assert!(rendered.contains("ExecStart=\":/opt/my $tool%%/run\""));
+        assert!(!rendered.contains("EnvironmentFile="));
+        assert!(!rendered.contains("PassEnvironment="));
+    }
+
+    #[test]
+    fn launchd_environment_is_a_sorted_xml_string_dictionary() {
+        let mut m = manifest();
+        m.environment.insert("Z".into(), "last".into());
+        m.environment.insert("A".into(), String::new());
+        m.environment.insert(
+            "LITERAL".into(),
+            r#"<key>Injected</key>&"' $HOME ${HOME} 100% \ "#.into(),
+        );
+        let rendered = Platform::Macos.render(&m).unwrap();
+        assert!(rendered.contains(concat!(
+            "  <key>EnvironmentVariables</key>\n  <dict>\n",
+            "    <key>A</key><string></string>\n",
+            "    <key>LITERAL</key><string>&lt;key&gt;Injected&lt;/key&gt;&amp;&quot;&apos; $HOME ${HOME} 100% \\ </string>\n",
+            "    <key>Z</key><string>last</string>\n  </dict>\n",
+        )));
+        assert_eq!(rendered.matches("<key>EnvironmentVariables</key>").count(), 1);
+        assert!(!rendered.contains("<key>Injected</key>"));
+        assert!(!rendered.contains("<key>PATH</key>"));
+    }
+
+    #[test]
+    fn environment_display_redacts_every_value_without_changing_raw_rendering() {
+        let mut m = manifest();
+        m.environment.insert("EMPTY".into(), String::new());
+        m.environment.insert(
+            "PATH".into(),
+            "/private-original-path/bin:/usr/bin".into(),
+        );
+        m.environment.insert(
+            "TOKEN".into(),
+            "private-original-value $HOME %i <tag>".into(),
+        );
+        let original = m.clone();
+        let stdout = Path::new("/private/logs/stdout");
+        let stderr = Path::new("/private/logs/stderr");
+        for platform in [Platform::Linux, Platform::Macos] {
+            let raw = platform.render(&m).unwrap();
+            for display in [
+                platform.render_redacted(&m).unwrap(),
+                platform
+                    .render_with_logs_redacted(&m, stdout, stderr)
+                    .unwrap(),
+            ] {
+                assert_eq!(display.matches("[REDACTED]").count(), 3);
+                assert!(
+                    display.contains("Environment values redacted; display only, not replayable.")
+                );
+                assert!(!display.contains("private-original-value"));
+                assert!(!display.contains("private-original-path"));
+            }
+            assert!(raw.contains("private-original-value"));
+            assert!(raw.contains("private-original-path"));
+            assert!(!raw.contains("display only, not replayable"));
+            assert_eq!(platform.render(&m).unwrap(), raw);
+            let raw_logs = platform.render_with_logs(&m, stdout, stderr).unwrap();
+            assert!(raw_logs.contains("private-original-value"));
+            if platform == Platform::Macos {
+                let display = platform
+                    .render_with_logs_redacted(&m, stdout, stderr)
+                    .unwrap();
+                assert!(display.contains(
+                    "  <key>StandardOutPath</key><string>/private/logs/stdout</string>\n  <key>StandardErrorPath</key><string>/private/logs/stderr</string>\n</dict>\n</plist>\n"
+                ));
+            }
+        }
+        assert_eq!(m, original);
+    }
+
+    #[test]
+    fn raw_and_redacted_rendering_refuse_invalid_original_environment() {
+        for (name, value) in [
+            ("BAD=NAME", "private-render-value"),
+            ("VALUE", "private-render-value\nRestart=always"),
+            ("VALUE", "private-render-value\u{1ffff}"),
+            ("PATH", "private-render-value"),
+            ("PATH", "/private-render-value::/usr/bin"),
+        ] {
+            let mut m = manifest();
+            m.environment.insert(name.into(), value.into());
+            for platform in [Platform::Linux, Platform::Macos] {
+                for result in [
+                    platform.render(&m),
+                    platform.render_redacted(&m),
+                    platform.render_with_logs(&m, Path::new("/logs/out"), Path::new("/logs/err")),
+                    platform.render_with_logs_redacted(
+                        &m,
+                        Path::new("/logs/out"),
+                        Path::new("/logs/err"),
+                    ),
+                ] {
+                    let error = result.unwrap_err();
+                    assert_eq!(error.code, "invalid_environment");
+                    assert!(!error.to_string().contains("private-render-value"));
+                }
+            }
+        }
+    }
+
     #[test]
     fn systemd_preserves_argv_and_literal_specifiers() {
         let rendered = Platform::Linux.render(&manifest()).unwrap();

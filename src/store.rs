@@ -192,8 +192,12 @@ impl Store {
         };
         let text = std::str::from_utf8(&bytes)
             .map_err(|e| Error::new("invalid_state", format!("{id}: {e}")))?;
-        let record: Record =
-            toml::from_str(text).map_err(|e| Error::new("invalid_state", format!("{id}: {e}")))?;
+        let record: Record = toml::from_str(text).map_err(|_| {
+            Error::new(
+                "invalid_state",
+                "stored ownership record is not valid TOML or does not match the record schema",
+            )
+        })?;
         if record.manifest.id != id
             || self.expected(
                 &record.manifest,
@@ -1069,6 +1073,7 @@ mod tests {
                 cwd: root.clone(),
                 mode: Mode::Service,
                 restart: Restart::Never,
+                environment: Default::default(),
             };
             let store = Store::new(root.join("state"), root.join("native"), Platform::Linux);
             Self {
@@ -1496,5 +1501,77 @@ mod tests {
         state.remove(JOURNAL).unwrap();
         f.store.check().unwrap();
         assert!(f.store.plan_add(&f.manifest).unwrap().is_noop());
+    }
+
+    #[test]
+    fn environment_changes_round_trip_without_exposing_values_in_plans() {
+        for platform in [Platform::Linux, Platform::Macos] {
+            let mut f = Fixture::new();
+            f.store.platform = platform;
+            f.manifest
+                .environment
+                .insert("SETTING".into(), "private-original-17019".into());
+            f.manifest
+                .environment
+                .insert("PATH".into(), "/opt/example/bin:/usr/bin".into());
+            f.add();
+            let original = f.store.read(&f.manifest.id).unwrap();
+            let text = fs::read_to_string(f.store.state_dir.join("test-job.toml")).unwrap();
+            assert_eq!(toml::from_str::<Record>(&text).unwrap(), original);
+            assert!(text.contains("private-original-17019"));
+            assert_eq!(original.manifest, f.manifest);
+            assert!(f.store.plan_add(&f.manifest).unwrap().is_noop());
+            assert!(f.store.plan_update(&f.manifest).unwrap().is_noop());
+            let mut changed = f.manifest.clone();
+            changed
+                .environment
+                .insert("SETTING".into(), "private-changed-17019".into());
+            let plan = f.store.plan_update(&changed).unwrap();
+            assert!(!plan.is_noop());
+            let display = serde_json::to_string(&plan).unwrap();
+            assert!(!display.contains("private-original-17019"));
+            assert!(!display.contains("private-changed-17019"));
+            f.store.apply(&plan).unwrap();
+            let current = f.store.read(&f.manifest.id).unwrap();
+            assert_eq!(current.manifest, changed);
+            assert_eq!(current.schema_version, original.schema_version);
+            assert_eq!(current.log_generation, original.log_generation);
+            assert!(current.native_bytes.contains("private-changed-17019"));
+            assert!(!current.native_bytes.contains("private-original-17019"));
+            assert!(f.store.plan_update(&changed).unwrap().is_noop());
+            changed.environment.clear();
+            let removal = f.store.plan_update(&changed).unwrap();
+            assert!(!removal.is_noop());
+            f.store.apply(&removal).unwrap();
+            let record = f.store.read(&f.manifest.id).unwrap();
+            assert!(record.manifest.environment.is_empty());
+            assert!(
+                !toml::to_string(&record)
+                    .unwrap()
+                    .contains("[manifest.environment]")
+            );
+            assert_eq!(record.log_generation, original.log_generation);
+        }
+    }
+
+    #[test]
+    fn environment_only_state_changes_invalidate_an_earlier_plan() {
+        let mut f = Fixture::new();
+        f.manifest
+            .environment
+            .insert("SETTING".into(), "original".into());
+        f.add();
+        let mut first = f.manifest.clone();
+        first.environment.insert("SETTING".into(), "first".into());
+        let stale = f.store.plan_update(&first).unwrap();
+        let mut second = f.manifest.clone();
+        second
+            .environment
+            .insert("SETTING".into(), "second".into());
+        f.store
+            .apply(&f.store.plan_update(&second).unwrap())
+            .unwrap();
+        assert_eq!(f.store.apply(&stale).unwrap_err().code, "stale_plan");
+        assert_eq!(f.store.read(&f.manifest.id).unwrap().manifest, second);
     }
 }

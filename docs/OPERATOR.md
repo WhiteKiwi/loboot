@@ -28,9 +28,35 @@ loboot add worker.toml --dry-run --json
 loboot add worker.toml
 ```
 
-Use the paths of your actual application. IDs match `[a-z][a-z0-9-]{0,62}`. All TOML fields are required, including `args = []` when there are no arguments. Unknown fields are errors. Input files, executable/cwd paths, and their ancestors must not be symlinks; executable and cwd must already exist.
+Use the paths of your actual application. IDs match `[a-z][a-z0-9-]{0,62}`. All six original TOML fields are required, including `args = []` when there are no arguments. The `[environment]` table described below is optional and unreleased. Unknown fields are errors. Input files, executable/cwd paths, and their ancestors must not be symlinks; executable and cwd must already exist.
 
 The executable runs directly. loboot does not interpret `~`, `$VARIABLE`, globs, pipes, or redirects in stored values. Your invoking shell may still expand unquoted arguments before loboot sees them. Programs can themselves interpret arguments; use only trusted programs. A long-running service should remain in the foreground so the native manager can track it.
+
+### Environment and PATH (unreleased)
+
+Use a manifest, not a direct `--env` flag, to configure a service's non-secret environment. For example, append this table **after the six required fields**:
+
+```toml
+[environment]
+APP_MODE = "production"
+LOG_LEVEL = "info"
+PATH = "/opt/tools/bin:/usr/bin:/bin"
+```
+
+Values must be quoted TOML strings, including numbers or booleans that your application expects as text. Empty string values are allowed except for `PATH`. Entries are sorted by name. There are limits of 64 entries, 128 ASCII bytes per name, 4096 UTF-8 bytes per value, and 32768 aggregate bytes including names and `=`/NUL overhead. Names match `[A-Za-z_][A-Za-z0-9_]*`; control characters and Unicode noncharacters in values are rejected. See [the exact validation contract](CLI.md#environment-and-path-unreleased).
+
+- Omit `PATH` to leave the native manager's default search path unchanged. The environment of your interactive terminal is not captured/imported, and shell startup files are not sourced.
+- Set `PATH` only when the application or its child processes need a specific path. It is a **complete override**, not an append; write every intended absolute directory explicitly. Do not use `$PATH`, `~`, relative directories, empty entries, or `.`/`..` components.
+- `PATH` is checked for syntax only. Verify directory existence and trust yourself. It does not select the service executable, which must still be an absolute existing regular executable with no symlink components.
+- Values and argv are literal. `$APP_MODE` in an argument does not become the configured value, and no shell commands, virtualenv activation, or runtime/version-manager initialization are performed. Manager defaults may supply other variables; this is not an isolated or fully reproducible environment.
+
+The [Node example](../examples/node-environment.toml) uses an absolute Node executable plus ordinary `NODE_ENV`/application configuration. The [Python example](../examples/python-environment.toml) uses an absolute Python executable and `PYTHONUNBUFFERED`, without activating a virtualenv. Replace all example executable, script, and cwd paths with actual paths for your account. Interpreter/version-manager and virtualenv launchers are often symlinks and may be refused; choosing a runtime installation is your responsibility, and merely setting `VIRTUAL_ENV` does not activate one.
+
+Preview with `loboot explain MANIFEST --json` and `loboot add MANIFEST --dry-run --json`. `list`, `show`, and `explain` display configured names but redact their values. A native definition in that output is marked as a **non-replayable redacted preview**, not an exact backup or a file to install. Retain the original manifest privately; changing environment requires an explicit stopped `update MANIFEST`, never editing the native file or copying its redacted preview.
+
+**Not for secrets:** original values remain plaintext in the manifest, managed record, native definition, and recovery journal. Native tools, the manager, descendants, and application logs may reveal them. The explicit `recover plan --json` export intentionally retains exact raw values for recovery and must stay private; apply/dry-run summaries do not make that input file safe to share. There is no encryption, secret store, or sandbox.
+
+Published v0.1.0 binaries do not support `[environment]`. Omitted/empty environment preserves old renderings and loadable schema-1/schema-2 records in current source; new nonempty records cannot be managed by a pre-feature binary. This compatibility rule is independent of macOS schema-2 capture. Downgrading does not remove environment configuration or restore an earlier record. Keep a compatible binary for services that use it.
 
 ### Modes and restart policies
 
@@ -97,7 +123,7 @@ loboot doctor --json
 loboot status worker --json
 ```
 
-- `list`/`show` validate local ownership records and expected native bytes; they do not query the manager.
+- `list`/`show` validate local ownership records and expected native bytes; they do not query the manager. Their public output redacts configured environment values, not the exact stored bytes used for ownership.
 - `discover` is a shallow inventory of `.service`/`.plist` files in the configured directory. External entries are read-only. It is not a machine-wide inventory and cannot import services.
 - `doctor` reports state health and session availability separately. Its successful outer envelope does not mean every diagnostic passed.
 - `status` requires a live session and reports `loaded`, `running`, and `enabled` independently, with `null` where a dimension is unknown.
@@ -144,9 +170,9 @@ A stored record is **not** an input manifest: it is TOML metadata plus a `[manif
 
 If an interrupted change leaves `.pending.json`, stop normal mutations and preserve private backups. Source builds after v0.1.0 provide `recover plan` and `recover apply`; published v0.1.0 binaries do not. Follow the [full recovery procedure](TROUBLESHOOTING.md#interrupted-filesystem-change) before applying anything.
 
-From a private directory outside the managed state/native directories, save `loboot recover plan --to before --json > recovery.json` to a new file after setting `umask 077`. The default target is `before`; use `--to after` only to deliberately complete the interrupted pair. Review the exact before/after definitions, journal/current-state snapshot, file metadata and intended target. Keep the plan at mode 0600: it can contain sensitive plaintext arguments and paths. Do not share it or edit it to override checks.
+From a private directory outside the managed state/native directories, save `loboot recover plan --to before --json > recovery.json` to a new file after setting `umask 077`. The default target is `before`; use `--to after` only to deliberately complete the interrupted pair. Review the exact before/after definitions, journal/current-state snapshot, file metadata and intended target. Keep the plan at mode 0600: it is an explicitly sensitive exact export with raw environment values as well as potentially sensitive plaintext arguments and paths. Do not share it or edit it to override checks. Without `--json`, `recover plan` shows only a value-free summary; adding `--dry-run` to a JSON export does not hide the raw values.
 
-`loboot recover apply recovery.json --dry-run --json` previews without writes, locks or native queries. `loboot recover apply recovery.json --json` explicitly re-reads under the exclusive lock and refuses a plan that no longer exactly matches. Live apply requires Linux not running or macOS unloaded; an absent target also requires safe disabled/no-activation state. Prepare those conditions deliberately with verified platform tools while ordinary loboot commands are blocked. Recovery never stops, starts, enables, disables or reloads the job, and does not restore native runtime or preferences.
+`loboot recover apply recovery.json --dry-run --json` previews without writes, locks or native queries, and does not echo raw configured environment values in its summary. `loboot recover apply recovery.json --json` explicitly re-reads under the exclusive lock and refuses a plan that no longer exactly matches. Live apply requires Linux not running or macOS unloaded; an absent target also requires safe disabled/no-activation state. Prepare those conditions deliberately with verified platform tools while ordinary loboot commands are blocked. Recovery never stops, starts, enables, disables or reloads the job, and does not restore native runtime or preferences.
 
 The original journal stays until the selected record/native pair is verified. An interrupted apply needs a fresh plan; a completed replay refuses with `no_pending_recovery` and makes no changes. A fresh plan after completion reports `pending: false`. Unknown, foreign, drifted, symlinked, hardlinked, malformed or stale evidence is not force-repaired.
 

@@ -25,6 +25,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import tomllib
 import uuid
 
 
@@ -118,6 +119,93 @@ def existing_user_bus(env, uid):
     return env
 
 
+# Intentionally non-secret literals. Never collect the inherited environment.
+# PATH is a fixture-process override, not the PATH used for loboot's helpers.
+FIXTURE_ENVIRONMENT = {
+    "LOBOOT_FIXTURE_SPACES": " leading and trailing spaces ",
+    "LOBOOT_FIXTURE_QUOTES": "single ' and double \" quotes",
+    "LOBOOT_FIXTURE_BACKSLASH": r"one\two\three",
+    "LOBOOT_FIXTURE_DOLLARS": "$HOME ${X}",
+    "LOBOOT_FIXTURE_SPECIFIERS": "%n %% %h",
+    "LOBOOT_FIXTURE_EQUALS": "one=two=three",
+    "LOBOOT_FIXTURE_XML": '<tag attr="value">&literal</tag>',
+    "LOBOOT_FIXTURE_UNICODE": "한글 café 雪 🚀",
+    "LOBOOT_FIXTURE_EMPTY": "",
+    "LOBOOT_FIXTURE_REVISION": "initial",
+    "PATH": "/loboot-native-fixture path/$HOME/%n:/loboot-native-fixture/${X}/%%",
+}
+OWNED_RECORD_LIMIT = 4 * 1024 * 1024
+
+
+def read_owned_record(home, path):
+    """Read a bounded, stable owned record without following descendant links.
+
+    The caller must first validate native ownership/drift with `loboot show`.
+    This local read recovers exact values that normal show deliberately hides;
+    it never emits the record or uses redacted values as ownership evidence.
+    """
+    relative = path.relative_to(home)
+    require(relative.parts and all(part not in (".", "..") for part in relative.parts),
+            "fixture record escapes runner home")
+    directories = []
+    file_fd = None
+
+    def identity(info):
+        return (info.st_dev, info.st_ino, info.st_mode, info.st_uid,
+                info.st_gid, info.st_nlink, info.st_size,
+                info.st_mtime_ns, info.st_ctime_ns)
+
+    def owned_directory(fd):
+        info = os.fstat(fd)
+        require(stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid()
+                and info.st_mode & 0o022 == 0, "unsafe fixture record directory")
+        return info
+
+    try:
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+        fd = os.open(home, flags)
+        directories.append((fd, None, home, os.fstat(fd)))
+        owned_directory(fd)
+        for component in relative.parts[:-1]:
+            parent_fd = fd
+            fd = os.open(component, flags, dir_fd=parent_fd)
+            directories.append((fd, parent_fd, component, os.fstat(fd)))
+            owned_directory(fd)
+        file_fd = os.open(relative.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+                          dir_fd=fd)
+        before = os.fstat(file_fd)
+        require(stat.S_ISREG(before.st_mode) and before.st_uid == os.getuid()
+                and before.st_nlink == 1 and before.st_mode & 0o022 == 0
+                and before.st_size <= OWNED_RECORD_LIMIT, "unsafe fixture ownership record")
+        chunks, size = [], 0
+        while size <= OWNED_RECORD_LIMIT:
+            chunk = os.read(file_fd, min(65536, OWNED_RECORD_LIMIT + 1 - size))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            size += len(chunk)
+        require(size <= OWNED_RECORD_LIMIT and size == before.st_size,
+                "fixture ownership record changed or exceeded read bound")
+        require(identity(before) == identity(os.fstat(file_fd))
+                == identity(os.stat(relative.name, dir_fd=fd, follow_symlinks=False)),
+                "fixture ownership record changed during read")
+        for directory_fd, parent_fd, name, before_directory in directories:
+            current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+            require(identity(before_directory) == identity(os.fstat(directory_fd)) == identity(current),
+                    "fixture ownership directory changed during read")
+        try:
+            record = tomllib.loads(b"".join(chunks).decode("utf-8"))
+        except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+            raise SmokeError("fixture ownership record is not valid UTF-8 TOML") from exc
+        require(isinstance(record.get("manifest"), dict), "fixture ownership record lacks manifest")
+        return record
+    finally:
+        if file_fd is not None:
+            os.close(file_fd)
+        for fd, _, _, _ in reversed(directories):
+            os.close(fd)
+
+
 FIXTURE = '''import json, os, signal, sys, time
 log, kind, marker = sys.argv[1:]
 if kind == "service":
@@ -138,7 +226,8 @@ if os.path.exists(log):
                 pass
 with open(log, "a", encoding="utf-8") as stream:
     stream.write(json.dumps({"pid": os.getpid(), "kind": kind, "marker": marker,
-                            "previous_live_pids": previous_live_pids}) + "\\n")
+                            "previous_live_pids": previous_live_pids,
+                            "environment": {name: os.environ.get(name) for name in ENVIRONMENT_KEYS}}) + "\\n")
     stream.flush()
     os.fsync(stream.fileno())
 if kind == "fail":
@@ -148,7 +237,7 @@ if kind == "fail":
 if kind == "service":
     while True:
         signal.pause()
-'''
+'''.replace("ENVIRONMENT_KEYS", repr(tuple(FIXTURE_ENVIRONMENT)))
 
 
 class NativeSmoke:
@@ -241,14 +330,29 @@ class NativeSmoke:
         self.wait("fixture processes exited", lambda: all(
             not self.pid_exists(event["pid"]) for event in self.events(id)))
 
+    def verify_environment(self, id):
+        events = self.events(id)
+        require(events, "no fixture invocation available for environment verification")
+        for event in events:
+            expected = [manifest["environment"] for manifest in self.manifests[id]
+                        if manifest["args"][-1] == event.get("marker")]
+            require(len(expected) == 1 and event.get("environment") == expected[0],
+                    f"fixture environment literals or PATH changed: {id}")
+        self.check("fixture environment literals and PATH preserved on every invocation")
+
     def manifest(self, id, kind, marker):
         executable = Path(sys.executable).resolve(strict=True)
         value = {"id": id, "executable": str(executable),
                  "args": [str(self.sandbox / "fixture.py"), str(self.sandbox / f"{id}.jsonl"), kind, marker],
                  "cwd": str(self.sandbox), "mode": "service" if kind == "service" else "once",
-                 "restart": "always" if kind == "service" else "never"}
+                 "restart": "always" if kind == "service" else "never",
+                 "environment": dict(FIXTURE_ENVIRONMENT, LOBOOT_FIXTURE_REVISION=marker)}
         path = self.sandbox / f"{id}.toml"
-        path.write_text("\n".join(f"{key} = {json.dumps(value)}" for key, value in value.items()) + "\n", encoding="utf-8")
+        lines = [f"{key} = {json.dumps(item, ensure_ascii=False)}"
+                 for key, item in value.items() if key != "environment"]
+        lines += ["", "[environment]"]
+        lines += [f"{key} = {json.dumps(item, ensure_ascii=False)}" for key, item in value["environment"].items()]
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         self.manifests.setdefault(id, []).append(value)
         return path
 
@@ -322,6 +426,7 @@ class NativeSmoke:
             self.check("Linux missing-session status reports session_unavailable")
         else:
             self.cli("start", once, error="disabled_service")
+        self.verify_environment(once)
         self.remove(once)
 
         service = self.add("service")
@@ -362,6 +467,7 @@ class NativeSmoke:
         self.check("stopped definition update did not start; later start used new argv")
         self.stop_disable(service)
         self.stable_count(service, 5)
+        self.verify_environment(service)
         self.remove(service)
 
         failing = self.add("fail")
@@ -391,6 +497,7 @@ class NativeSmoke:
                 "failure status omitted its fixed native-exit hint")
         self.check("stdout/stderr captured, common token redacted, log reads bounded, and exit diagnostics preserved")
         self.stop_disable(failing)
+        self.verify_environment(failing)
         self.remove(failing)
 
     def stop_disable(self, id):
@@ -504,7 +611,8 @@ class NativeSmoke:
                 record = self.state_dir / f"{id}.toml"
                 if record.exists() or record.is_symlink():
                     # Refuse any native fallback when ownership/drift validation fails.
-                    actual = self.cli("show", id)["service"]["manifest"]
+                    self.cli("show", id)  # Validates managed ownership and native drift, not raw values.
+                    actual = read_owned_record(self.home, record)["manifest"]
                     require(actual in self.manifests[id], f"owned fixture record changed: {id}")
                     self.stop_disable(id)
                     self.remove(id)
