@@ -1,0 +1,218 @@
+name: macOS signed candidates (no publication)
+# Deliberately NOT callable from pull requests or the release publisher. Enabling
+# this path and supplying protected-environment credentials are owner actions.
+on:
+  workflow_dispatch:
+    inputs:
+      expected_commit:
+        description: Exact reviewed 40-character main SHA to sign
+        type: string
+        required: true
+      authorize_signing_upload:
+        description: Authorize signing this revision and uploading its CLI binaries to Apple for notarization; never publish
+        type: boolean
+        required: true
+        default: false
+permissions:
+  contents: read
+concurrency:
+  group: macos-signing-candidates
+  cancel-in-progress: false
+env:
+  SIGNING_TEAM: ${{ vars.MACOS_SIGNING_TEAM_ID }}
+  SIGNING_IDENTITY: ${{ vars.MACOS_SIGNING_IDENTITY_SHA1 }}
+  SIGNING_IDENTIFIER: ${{ vars.MACOS_SIGNING_IDENTIFIER }}
+  NOTARY_KEY_ID: ${{ vars.MACOS_NOTARY_KEY_ID }}
+  NOTARY_ISSUER: ${{ vars.MACOS_NOTARY_ISSUER }}
+jobs:
+  gate:
+    name: Explicit owner opt-in and reviewed main revision
+    if: github.repository == 'WhiteKiwi/loboot' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      commit: ${{ steps.validate.outputs.commit }}
+      version: ${{ steps.validate.outputs.version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - name: Validate request without accessing signing secrets
+        id: validate
+        env:
+          EXPECTED_COMMIT: ${{ inputs.expected_commit }}
+          SIGNING_ENABLED: ${{ vars.MACOS_SIGNING_ENABLED }}
+          SIGNING_APPROVED: ${{ inputs.authorize_signing_upload }}
+        run: |
+          test "$SIGNING_ENABLED" = true || { echo 'Owner must configure and review the protected environment before enabling this workflow.' >&2; exit 1; }
+          test "$SIGNING_APPROVED" = true || { echo 'This dispatch must explicitly authorize signing and the Apple upload.' >&2; exit 1; }
+          [[ "$EXPECTED_COMMIT" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          test "$(git rev-parse HEAD)" = "$EXPECTED_COMMIT"
+          test "$GITHUB_SHA" = "$EXPECTED_COMMIT"
+          git merge-base --is-ancestor "$EXPECTED_COMMIT" origin/main
+          python3 - <<'PY'
+          import os, sys
+          from pathlib import Path
+          sys.path.insert(0, 'scripts')
+          import macos_signing, release
+          macos_signing.signing_identity(os.environ['SIGNING_TEAM'], os.environ['SIGNING_IDENTITY'], os.environ['SIGNING_IDENTIFIER'], os.environ['NOTARY_KEY_ID'], os.environ['NOTARY_ISSUER'])
+          version = release.read_package(Path('.'))['version']
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f"commit={os.environ['EXPECTED_COMMIT']}\nversion={version}\n")
+          PY
+  build:
+    name: Credential-free build / ${{ matrix.target }}
+    needs: gate
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            target: aarch64-apple-darwin
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.gate.outputs.commit }}
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - run: rustup toolchain install 1.99.0 --profile minimal
+      - run: cargo test --locked --all-targets
+      - run: cargo build --locked --release
+      - name: Package and bind the unsigned input to this run
+        env:
+          TARGET: ${{ matrix.target }}
+          COMMIT: ${{ needs.gate.outputs.commit }}
+          VERSION: ${{ needs.gate.outputs.version }}
+        run: |
+          python3 scripts/release.py build --target "$TARGET" --output unsigned-input/bundle
+          python3 scripts/macos_signing.py bind-input --bundle unsigned-input/bundle \
+            --target "$TARGET" --version "$VERSION" --commit "$COMMIT" --run-id "$GITHUB_RUN_ID" \
+            --output unsigned-input/provenance.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: macos-unsigned-input-${{ matrix.target }}
+          path: unsigned-input/
+          if-no-files-found: error
+          retention-days: 14
+  sign:
+    name: Sign and notarize candidate / ${{ matrix.target }}
+    needs: [gate, build]
+    if: github.repository == 'WhiteKiwi/loboot' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && vars.MACOS_SIGNING_ENABLED == 'true' && inputs.authorize_signing_upload && needs.gate.outputs.commit == github.sha
+    # Must already be configured by the owner with main-only branch protection
+    # and required review. Naming an environment does NOT configure protection.
+    environment: macos-signing
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            target: aarch64-apple-darwin
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.gate.outputs.commit }}
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: macos-unsigned-input-${{ matrix.target }}
+          path: unsigned-input
+      - name: Plan verified commands without credentials
+        env:
+          TARGET: ${{ matrix.target }}
+          COMMIT: ${{ needs.gate.outputs.commit }}
+          VERSION: ${{ needs.gate.outputs.version }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$COMMIT"
+          python3 scripts/macos_signing.py plan --bundle unsigned-input/bundle --provenance unsigned-input/provenance.json \
+            --target "$TARGET" --version "$VERSION" --commit "$COMMIT" --run-id "$GITHUB_RUN_ID" \
+            --team-id "$SIGNING_TEAM" --identity "$SIGNING_IDENTITY" --identifier "$SIGNING_IDENTIFIER" \
+            --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER"
+      - name: Sign exact input and submit to Apple (no binary execution)
+        env:
+          TARGET: ${{ matrix.target }}
+          COMMIT: ${{ needs.gate.outputs.commit }}
+          VERSION: ${{ needs.gate.outputs.version }}
+          LOBOOT_SIGNING_ENABLED: ${{ vars.MACOS_SIGNING_ENABLED }}
+          LOBOOT_SIGNING_APPROVED: ${{ inputs.authorize_signing_upload }}
+          MACOS_CERTIFICATE_BASE64: ${{ secrets.MACOS_CERTIFICATE_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_NOTARY_KEY: ${{ secrets.MACOS_NOTARY_KEY }}
+        run: |
+          python3 scripts/macos_signing.py execute --bundle unsigned-input/bundle --provenance unsigned-input/provenance.json \
+            --target "$TARGET" --version "$VERSION" --commit "$COMMIT" --run-id "$GITHUB_RUN_ID" \
+            --team-id "$SIGNING_TEAM" --identity "$SIGNING_IDENTITY" --identifier "$SIGNING_IDENTIFIER" \
+            --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER" --output signed-candidate
+      - name: Preserve nonsecret evidence, including pending submissions
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: macos-signing-evidence-${{ matrix.target }}
+          path: signed-candidate/evidence/
+          if-no-files-found: warn
+          retention-days: 14
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: macos-signed-candidate-${{ matrix.target }}
+          path: signed-candidate/
+          if-no-files-found: error
+          retention-days: 14
+  verify:
+    name: Credential-free trust and archive smoke / ${{ matrix.target }}
+    needs: [gate, sign]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            target: aarch64-apple-darwin
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.gate.outputs.commit }}
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - run: rustup toolchain install 1.99.0 --profile minimal
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: macos-signed-candidate-${{ matrix.target }}
+          path: signed-candidate
+      - name: Independently verify extracted bytes, Apple trust and offline CLI
+        env:
+          TARGET: ${{ matrix.target }}
+          COMMIT: ${{ needs.gate.outputs.commit }}
+          VERSION: ${{ needs.gate.outputs.version }}
+        run: |
+          python3 scripts/macos_signing.py verify --native --bundle signed-candidate/bundle --evidence signed-candidate/evidence \
+            --target "$TARGET" --version "$VERSION" --commit "$COMMIT" --run-id "$GITHUB_RUN_ID" \
+            --team-id "$SIGNING_TEAM" --identity "$SIGNING_IDENTITY" --identifier "$SIGNING_IDENTIFIER" \
+            --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER" > verification.json
+          echo 'Signed candidate trust and offline CLI smoke passed. No publication or fresh-machine Gatekeeper acceptance.' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: macos-signing-verification-${{ matrix.target }}
+          path: verification.json
+          if-no-files-found: error
+          retention-days: 14
