@@ -19,12 +19,12 @@ Actions are revision-pinned, checkout credentials are not persisted, permissions
 
 | Runner | Native artifact target |
 | --- | --- |
-| Ubuntu 24.04 | `x86_64-unknown-linux-gnu` |
-| Ubuntu 24.04 ARM | `aarch64-unknown-linux-gnu` |
+| Ubuntu 22.04 (`ubuntu-22.04`) | `x86_64-unknown-linux-gnu` |
+| Ubuntu 22.04 ARM (`ubuntu-22.04-arm`) | `aarch64-unknown-linux-gnu` |
 | macOS 15 | `aarch64-apple-darwin` |
 | macOS 15 Intel | `x86_64-apple-darwin` |
 
-Runner labels follow [GitHub's supported hosted runners](https://docs.github.com/en/actions/reference/runners/github-hosted-runners). These are tested build/install baselines, not broader lifecycle support claims. Linux builds require glibc 2.39 or newer. Windows, musl/static builds, older Linux ABIs, and older macOS systems are not established.
+Runner labels follow [GitHub's supported hosted runners](https://docs.github.com/en/actions/reference/runners/github-hosted-runners). This is the **unpublished candidate** matrix. Passing checks for the exact candidate establish build/install coverage only, not broader lifecycle support. Published v0.1.0 retains its historical Ubuntu 24.04 / glibc 2.39 baseline and unchanged bytes. Windows, musl/static builds, older Linux ABIs, and older macOS systems are not established.
 
 Each target tests/builds natively. `scripts/release.py` validates Cargo/binary versions, the Rust host target, and actual ELF64/Mach-O64 architecture. It creates `loboot-vVERSION-TARGET.tar.gz` containing exactly:
 
@@ -40,15 +40,70 @@ Archives have normalized metadata and an exact regular-file inventory. Validatio
 
 The collection job requires exactly all four archives and validates their manifests/checksums. It emits `manifest.json` using `loboot.release/v1` and a combined `SHA256SUMS.txt`. Actions artifacts are retained for 14 days. The [implementation notes](IMPLEMENTATION.md) distinguish isolated native checks from fake/offline tests and pending logout/login acceptance.
 
+### Linux candidate baseline (unreleased)
+
+The two Linux packaging lanes use maintained, explicit Ubuntu 22.04 OS labels,
+not `-latest`, with Rust **1.99.0**, locked Cargo dependencies, and explicitly set
+Python 3.12 (the scripts require 3.11+). The runner labels are **not immutable
+images**: GitHub updates their packages and image versions. Pinning the OS label
+and Rust toolchain is not a byte-reproducibility guarantee.
+
+After building and checking the strict archive, `scripts/linux_baseline.py`:
+
+1. Requires the actual native Ubuntu 22.04 distribution, runtime glibc 2.35,
+   matching CPU/Rust host target, and pinned Rust/Cargo versions. There is no
+   cross-linker, QEMU, container runtime, musl target, or custom runner fallback.
+2. Revalidates the exact `loboot.release/v1` bundle and ELF64 architecture, then
+   copies only the verified archive's binary into a fresh temporary directory.
+3. Requires GNU `readelf --version-info --wide`, `--dyn-syms --wide`, and
+   `--dynamic --wide` output. Missing tooling, empty/malformed/truncated output,
+   inconsistent version tables, unknown version namespaces (including
+   `GLIBC_PRIVATE` / `GLIBC_ABI_*`), dynamic search-path overrides, and packed
+   relocation requirements fail closed. GLIBC versions are compared numerically,
+   including patch components, against the 2.35 ceiling.
+4. Conservatively rejects **all** GLIBC references above 2.35, including weak
+   references. Evidence preserves version-needs flags separately from dynamic
+   symbol binding/section, so a weak reference is not described as a strong
+   dependency or a proven hard runtime floor.
+5. Runs the extracted binary's version/help and offline JSON dry-run on the
+   native baseline with isolated HOME and empty PATH. This must pass on both
+   Linux architectures for the exact candidate before claiming lower-baseline
+   build/install coverage. Static inspection alone is insufficient.
+
+The separate `loboot-linux-baseline-TARGET` Actions artifact records the source
+commit, archive/binary hashes, distro, runtime glibc, CPU, runner label,
+`ImageVersion`, Rust/Cargo/Python versions, host `cc`/`ld` diagnostics, raw inspection output,
+command failures, and smoke outcome. Host `cc`/`ld` versions describe available
+tools, not proof of the compiler/linker selected by Rust (which may use rust-lld).
+It is uploaded even after a guard failure,
+when a report exists, and retained for 14 days. It lives outside `dist`, so the
+four archive names, exact inventory, checksums, and `loboot.release/v1` schema
+remain unchanged. The inventory/publication jobs consume only `loboot-dist-*`.
+A build failure before the guard may have logs but no baseline report; it is not
+a baseline pass.
+
+The separate opt-in disposable hosted lifecycle smoke is unchanged: a missing
+existing user manager/session is a reported skip, **not a pass**, and no session
+or linger settings are changed. Neither an offline smoke nor a hosted lifecycle
+pass proves real logout/login activation. The recorded kernel is diagnostic
+context, not a supported kernel minimum or a promise across all Linux systems.
+Record revision-specific native runs, reported GLIBC maxima, runtime smoke
+outcomes, and any remaining architecture gaps in [issue #14](https://github.com/WhiteKiwi/loboot/issues/14).
+A link or static report alone does not satisfy the two-native-lane requirement.
+This work does not publish a release or replace v0.1.0 assets.
+
 ### Local rehearsal
 
-Python 3.11+, cached locked Cargo dependencies, and the pinned Rust toolchain are required:
+Python 3.11+, cached locked Cargo dependencies, and the pinned Rust toolchain are required. The additional Linux baseline check needs GNU binutils, a native compiler/linker, and an actual Ubuntu 22.04 / glibc 2.35 host:
 
 ```sh
 cargo build --locked --release
 python3 scripts/release.py build --target x86_64-unknown-linux-gnu --tag v0.1.0 --output dist/linux
 python3 scripts/release.py check --target x86_64-unknown-linux-gnu --tag v0.1.0 --input dist/linux
 python3 scripts/release.py gate --tag v0.1.0
+# On native x64 Ubuntu 22.04 only; use the matching target/label on ARM64.
+python3 scripts/linux_baseline.py --input dist/linux --target x86_64-unknown-linux-gnu \
+  --runner-label ubuntu-22.04 --report /tmp/loboot-linux-baseline.json
 ```
 
 Use the native target for the current machine; cross-linking is rejected. Outputs must be absent/empty so previous evidence is not overwritten.
@@ -74,7 +129,7 @@ Homebrew infers the version from the archive URLs. The published v0.1.0 formula 
 ## Release checklist
 
 1. Curate Cargo version and the matching changelog, license texts, platform limits, and dependency notices. Record native coverage honestly; real logout/login acceptance remains separate.
-2. Merge only after exact-head CI and all four packaging jobs succeed. Verify the resulting main commit's checks.
+2. Merge only after exact-head CI and all four packaging jobs succeed, including both native Linux baseline reports with extracted-archive offline smoke. Verify the resulting main commit's checks. Keep hosted lifecycle skips/failures separate from ABI/install results.
 3. Run the gate locally on the reviewed revision, then create the approved annotated tag and push only that tag:
 
    ```sh

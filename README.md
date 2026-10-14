@@ -35,7 +35,9 @@ brew install WhiteKiwi/tap/loboot
 loboot --version
 ```
 
-Alternatively, download the matching macOS/Linux x64 or ARM64 archive from [GitHub Releases](https://github.com/WhiteKiwi/loboot/releases) and verify its SHA-256 checksum. macOS binaries are unsigned/unnotarized; Linux binaries require glibc 2.39 or newer. [Detailed installation](docs/INSTALL.md).
+Alternatively, download the matching macOS/Linux x64 or ARM64 archive from [GitHub Releases](https://github.com/WhiteKiwi/loboot/releases) and verify its SHA-256 checksum. macOS binaries are unsigned/unnotarized. Published v0.1.0 Linux archives have an Ubuntu 24.04 / glibc 2.39 tested baseline; older glibc support was not established for those bytes. [Detailed installation](docs/INSTALL.md).
+
+**Unreleased Linux candidates:** the native packaging lanes target Ubuntu 22.04 / glibc 2.35 with a fail-closed ABI-reference check and extracted-archive offline smoke. Both native lanes must pass for the exact candidate before claiming the lower baseline. This does not change the published v0.1.0 archives or Homebrew downloads. [Candidate verification and limits](docs/RELEASE.md#linux-candidate-baseline-unreleased).
 
 To build from source:
 
