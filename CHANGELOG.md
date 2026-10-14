@@ -6,6 +6,7 @@ This file records user-facing changes. Versioned entries supply the curated GitH
 
 ### Added
 
+- Explicit read-only recovery plans and guarded apply for interrupted filesystem transactions, with before/after targets, exact locked snapshot revalidation, live stopped/absence checks, and schema-1/schema-2 support. Recovery preserves the original journal until the pair verifies, retains all log remnants, and never restores native runtime/preferences or performs native mutations. Plans are sensitive plaintext; save them privately outside managed directories. These commands are not in published v0.1.0 binaries.
 - Bounded Linux user-journal and private macOS stdout/stderr reads, fixed failure diagnostics, and byte/deadline-limited native helper capture. Legacy records remain readable; explicit stopped update opts macOS jobs into schema-2 capture. Application logs remain potentially sensitive and active file growth is not automatically capped.
 - Explicit isolated-account logout/login acceptance protocol, scoped invocation fixture, and bounded offline evidence validation. Synthetic tests verify report consistency only; real Linux/macOS session acceptance remains pending.
 

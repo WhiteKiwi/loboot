@@ -33,7 +33,22 @@ The new preparation tools and their synthetic tests do not change acceptance sta
 
 ## Deferred work
 
-Real logout/login activation evidence; automated explicit recovery; richer read-only discovery; Windows/system scope. These are visible limitations rather than placeholder success responses.
+Real logout/login activation evidence; richer read-only discovery; Windows/system scope. Explicit guarded recovery is described below; automatic repair or foreign-state adoption remains out of scope. These are visible limitations rather than placeholder success responses.
+
+## Explicit recovery contract and acceptance (unreleased)
+
+[Issue #11](https://github.com/WhiteKiwi/loboot/issues/11) adds operator-selected filesystem recovery through `recover plan --to before|after --json` (default `before`) and `recover apply PLAN.json`. Planning snapshots raw before/after definitions, journal/current state and file metadata without effects. Apply re-reads under the exclusive mutation lock, rejects a stale or changed plan, and retains the original journal until the selected pair is verified. It performs no native mutations or capture cleanup.
+
+Acceptance coverage must distinguish these boundaries:
+
+- Before/after recovery for interrupted add, update and removal, including mixed record/native pairs and supported record schemas 1 and 2.
+- Exact snapshot revalidation; unknown/malformed journal or plan, foreign/drifted bytes, root/platform mismatch, unsafe symlinks/hardlinks and metadata changes must refuse without unsafe writes.
+- Live fake-runner checks for Linux not running or macOS unloaded, and safe disabled/no-activation state for absent targets. Unknown state must refuse; no stop/start/enable/disable/daemon-reload is permitted.
+- Filesystem snapshots around plan, dry-run apply, no-pending planning and completed-plan replay. Dry-run has no writes, locks or native queries; offline `--root` has no native calls. Successful recovery is followed by `pending: false`; completed replay returns `no_pending_recovery` with no changes.
+- Partial recovery keeps the original journal and requires a fresh plan. Schema-2 targets require complete verified capture; rollback before incomplete log initialization can retain schema-1/absent targets and log remnants without adoption, deletion, truncation or initialization.
+- CLI JSON purity, private plan-file guidance, and the distinction between restoring files and native runtime/preferences.
+
+This section records the implementation contract and required acceptance scope, **not results of an executed check**. Exact-revision results belong with the change's validation evidence. Historical v0.1.0 checks below do not verify these unreleased commands; native logout/login acceptance remains pending.
 
 ## Recorded verification evidence
 

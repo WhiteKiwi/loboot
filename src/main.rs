@@ -5,8 +5,9 @@ use loboot::{
         self, Action, CommandSpec, Platform, ProcessObserver, ProcessRunner, Runner,
         RuntimeContext, TeardownObserver,
     },
-    store::Store,
+    store::{RecoveryPlan, RecoveryTarget, Store, read_recovery_plan_file},
 };
+use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
     path::{Path, PathBuf},
@@ -44,6 +45,21 @@ enum RestartPolicy {
     Never,
     OnFailure,
     Always,
+}
+#[derive(Clone, Copy, ValueEnum)]
+enum RecoveryDestination {
+    Before,
+    After,
+}
+#[derive(Subcommand)]
+enum RecoveryCommands {
+    /// Inspect a pending transaction without changing files or native state.
+    Plan {
+        #[arg(long, value_enum, default_value = "before")]
+        to: RecoveryDestination,
+    },
+    /// Apply an exact, saved `recover plan --json` response.
+    Apply { plan: PathBuf },
 }
 #[derive(Subcommand)]
 enum Commands {
@@ -99,6 +115,10 @@ enum Commands {
     },
     Explain {
         manifest: PathBuf,
+    },
+    Recover {
+        #[command(subcommand)]
+        command: RecoveryCommands,
     },
     Doctor,
 }
@@ -198,6 +218,7 @@ fn context(cli: &Cli) -> Result<Context> {
 fn run(cli: &Cli) -> Result<Value> {
     let ctx = context(cli)?;
     match &cli.command {
+        Commands::Recover { command } => recover(cli, &ctx, command),
         Commands::Add { manifest, .. } | Commands::Update { manifest } => {
             let m = input_manifest(&cli.command, manifest)?;
             let update = matches!(cli.command, Commands::Update { .. });
@@ -335,6 +356,194 @@ fn run(cli: &Cli) -> Result<Value> {
         Commands::Disable { id } => runtime(cli, &ctx, Action::Disable, id),
     }
 }
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SavedRecoveryResponse {
+    schema_version: String,
+    ok: bool,
+    data: SavedRecoveryData,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SavedRecoveryData {
+    pending: bool,
+    plan: Option<RecoveryPlan>,
+}
+
+fn parse_recovery_response(bytes: &[u8]) -> Result<RecoveryPlan> {
+    let invalid = || {
+        Error::new(
+            "invalid_recovery_plan",
+            "expected an unmodified successful loboot.cli/v1 recover plan JSON response with a pending plan",
+        )
+    };
+    // Never include deserializer diagnostics: unknown keys and invalid values
+    // can contain plaintext definitions, command arguments, or other secrets.
+    let saved: SavedRecoveryResponse = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+    if saved.schema_version != "loboot.cli/v1" || !saved.ok || !saved.data.pending {
+        return Err(invalid());
+    }
+    saved.data.plan.ok_or_else(invalid)
+}
+
+fn recover(cli: &Cli, ctx: &Context, command: &RecoveryCommands) -> Result<Value> {
+    match command {
+        RecoveryCommands::Plan { to } => {
+            let target = match to {
+                RecoveryDestination::Before => RecoveryTarget::Before,
+                RecoveryDestination::After => RecoveryTarget::After,
+            };
+            let plan = ctx.store.plan_recovery(target)?;
+            Ok(json!({"pending":plan.is_some(),"plan":plan}))
+        }
+        RecoveryCommands::Apply { plan } => {
+            let plan = parse_recovery_response(&read_recovery_plan_file(plan)?)?;
+            if cli.dry_run {
+                ctx.store.validate_recovery_plan(&plan)?;
+                return Ok(json!({
+                    "dry_run":true,
+                    "id":plan.id,
+                    "target":plan.target,
+                    "changes":plan.changes,
+                    "validated":true,
+                    "native_checked":false,
+                    "runtime_restored":false,
+                    "note":"Exact filesystem evidence validated without a lock or native queries; live preconditions are checked only on apply."
+                }));
+            }
+            let outcome = ctx.store.apply_recovery_checked(&plan, || {
+                guard_recovery(ctx, &plan.id, plan.removes_definition(), &mut ProcessRunner)
+            })?;
+            Ok(
+                json!({"recovered":outcome,"runtime_restored":false,"note":"Only the selected filesystem pair was recovered. Runtime and enablement were not restored; no native mutation or reload was performed."}),
+            )
+        }
+    }
+}
+
+/// Recovery is not an ordinary edit: even daemon-reload would change native
+/// state before the recovery evidence has been committed. Query only.
+fn guard_recovery(
+    ctx: &Context,
+    id: &str,
+    removes_definition: bool,
+    runner: &mut dyn Runner,
+) -> Result<()> {
+    if ctx.offline {
+        return Ok(());
+    }
+    let session = ctx.platform.session_check(runner).map_err(|e| {
+        Error::new(
+            e.code,
+            "recovery could not verify the native user session; no native changes were attempted",
+        )
+    })?;
+    if ctx.platform == Platform::Linux {
+        let command = CommandSpec {
+            program: "systemctl".into(),
+            args: vec![
+                "--user".into(),
+                "show".into(),
+                "--property=NeedDaemonReload".into(),
+                "--value".into(),
+                "--no-pager".into(),
+                "--".into(),
+                ctx.platform.native_name(id),
+            ],
+        };
+        let uncertain = || {
+            Error::new(
+                "status_required",
+                "recovery could not prove the native manager has current definitions; inspect native state and deliberately reload outside recovery before saving a fresh plan",
+            )
+        };
+        let output = runner.run(&command).map_err(|_| uncertain())?;
+        if !output.success
+            || output.code != Some(0)
+            || output.signal.is_some()
+            || !output.is_complete()
+        {
+            return Err(uncertain());
+        }
+        match output.stdout.trim() {
+            "no" => (),
+            "yes" => {
+                return Err(Error::new(
+                    "native_sync_needed",
+                    "native definitions need a reload; inspect native state and deliberately reload outside recovery before saving a fresh plan; recovery did not reload anything",
+                ));
+            }
+            _ => return Err(uncertain()),
+        }
+    }
+    let status = ctx.platform.status(id, &session, runner).map_err(|e| {
+        Error::new(
+            e.code,
+            "recovery could not read trustworthy native status; no native changes were attempted",
+        )
+    })?;
+    ctx.platform
+        .verify_managed_status(id, &ctx.store.definition_path(id)?, &status)
+        .map_err(|e| {
+            Error::new(e.code, "recovery could not verify exclusive native ownership; no native changes were attempted")
+        })?;
+    let stopped = status.running == Some(false)
+        && match ctx.platform {
+            Platform::Linux => status
+                .raw
+                .get("ActiveState")
+                .is_some_and(|state| matches!(state.as_str(), "inactive" | "failed")),
+            Platform::Macos => status.loaded == Some(false),
+        };
+    if !stopped {
+        return Err(Error::new(
+            "service_not_stopped",
+            "recovery requires a stopped Linux service or an unloaded macOS job; runtime state was not changed",
+        ));
+    }
+    if removes_definition && status.enabled != Some(false) {
+        return Err(Error::new(
+            "service_not_disabled",
+            "recovery to an absent definition requires verifiably disabled native state; unknown enablement is not proof of absence",
+        ));
+    }
+    if removes_definition && ctx.platform == Platform::Linux {
+        // UnitFileState belongs to the manager's cached status. is-enabled
+        // checks current installation state and must independently say disabled.
+        let command = CommandSpec {
+            program: "systemctl".into(),
+            args: vec![
+                "--user".into(),
+                "is-enabled".into(),
+                "--no-pager".into(),
+                "--".into(),
+                ctx.platform.native_name(id),
+            ],
+        };
+        let uncertain = || {
+            Error::new(
+                "status_required",
+                "recovery could not verify current native enablement; inspect native state before saving a fresh plan",
+            )
+        };
+        let output = runner.run(&command).map_err(|_| uncertain())?;
+        if !output.is_complete() || output.signal.is_some() {
+            return Err(uncertain());
+        }
+        if output.success || output.code != Some(1) || output.stdout.trim() != "disabled" {
+            return Err(Error::new(
+                "service_not_disabled",
+                "recovery to absence requires a fresh, unambiguous disabled installation check; runtime-enabled, missing, static and unknown states are refused",
+            ));
+        }
+        reject_activation_collision(&ctx.native_dir, &ctx.platform.native_name(id))
+            .map_err(|e| Error::new(e.code, "recovery to absence found native activation links or unsafe activation directories; no links were removed"))?;
+    }
+    Ok(())
+}
+
 fn input_manifest(command: &Commands, path: &Path) -> Result<loboot::model::Manifest> {
     use loboot::model::{Manifest, Mode, Restart};
     if let Commands::Add {
@@ -1230,5 +1439,463 @@ mod tests {
         assert_eq!(mutations(&runner), ["bootstrap"]);
         assert_eq!(observer.pauses, 0);
         assert!(observer.pids.is_empty());
+    }
+
+    fn recovery_runner(outputs: Vec<CommandOutput>) -> ScriptedRunner {
+        ScriptedRunner {
+            outputs: outputs.into(),
+            calls: vec![],
+            tamper: None,
+            record_change: None,
+            capture_tamper: None,
+        }
+    }
+
+    fn linux_recovery_context() -> (tempfile::TempDir, Context, PathBuf) {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let native_dir = root.join("native");
+        let store = Store::new(root.join("state"), native_dir.clone(), Platform::Linux);
+        let definition = store.definition_path("example").unwrap();
+        (
+            temp,
+            Context {
+                store,
+                platform: Platform::Linux,
+                native_dir,
+                offline: false,
+            },
+            definition,
+        )
+    }
+
+    fn linux_recovery_observation(
+        definition: &Path,
+        load: &str,
+        active: &str,
+        enabled: &str,
+        dropins: &str,
+    ) -> Vec<CommandOutput> {
+        vec![
+            native_output(true, "Version=256\n", ""),
+            native_output(true, "no\n", ""),
+            native_output(
+                true,
+                &format!(
+                    "LoadState={load}\nActiveState={active}\nSubState=dead\nUnitFileState={enabled}\nMainPID=0\nFragmentPath={}\nDropInPaths={dropins}\n",
+                    definition.display(),
+                ),
+                "",
+            ),
+            CommandOutput {
+                success: false,
+                code: Some(1),
+                stdout: "disabled\n".into(),
+                ..Default::default()
+            },
+        ]
+    }
+
+    fn assert_recovery_queries_only(runner: &ScriptedRunner, platform: Platform) {
+        for command in &runner.calls {
+            match platform {
+                Platform::Linux => {
+                    assert_eq!(command.args.first().map(String::as_str), Some("--user"));
+                    assert!(matches!(
+                        command.args.get(1).map(String::as_str),
+                        Some("show" | "is-enabled")
+                    ));
+                }
+                Platform::Macos => assert!(matches!(
+                    command.args.first().map(String::as_str),
+                    Some("print" | "print-disabled")
+                )),
+            }
+        }
+    }
+
+    #[test]
+    fn recovery_linux_preflight_is_read_only_and_requires_stopped_owned_state() {
+        let (_temp, ctx, definition) = linux_recovery_context();
+        for (load, active, enabled, dropins, foreign, removing, expected) in [
+            ("loaded", "inactive", "disabled", "", false, true, None),
+            ("loaded", "failed", "disabled", "", false, true, None),
+            ("loaded", "inactive", "enabled", "", false, false, None),
+            (
+                "loaded",
+                "inactive",
+                "enabled",
+                "",
+                false,
+                true,
+                Some("service_not_disabled"),
+            ),
+            (
+                "loaded",
+                "inactive",
+                "enabled-runtime",
+                "",
+                false,
+                true,
+                Some("service_not_disabled"),
+            ),
+            (
+                "not-found",
+                "inactive",
+                "",
+                "",
+                false,
+                true,
+                Some("service_not_disabled"),
+            ),
+            ("not-found", "inactive", "disabled", "", false, true, None),
+            (
+                "stub",
+                "inactive",
+                "disabled",
+                "",
+                false,
+                true,
+                Some("status_required"),
+            ),
+            (
+                "future",
+                "inactive",
+                "disabled",
+                "",
+                false,
+                true,
+                Some("status_required"),
+            ),
+            (
+                "loaded",
+                "activating",
+                "disabled",
+                "",
+                false,
+                true,
+                Some("service_not_stopped"),
+            ),
+            (
+                "loaded",
+                "active",
+                "disabled",
+                "",
+                false,
+                true,
+                Some("service_not_stopped"),
+            ),
+            (
+                "loaded",
+                "inactive",
+                "disabled",
+                "/foreign.conf",
+                false,
+                true,
+                Some("native_conflict"),
+            ),
+            (
+                "loaded",
+                "inactive",
+                "disabled",
+                "",
+                true,
+                true,
+                Some("native_conflict"),
+            ),
+        ] {
+            let mut runner = recovery_runner(linux_recovery_observation(
+                if foreign {
+                    Path::new("/foreign.service")
+                } else {
+                    &definition
+                },
+                load,
+                active,
+                enabled,
+                dropins,
+            ));
+            let result = guard_recovery(&ctx, "example", removing, &mut runner);
+            assert_eq!(
+                result.err().map(|e| e.code),
+                expected,
+                "{load}/{active}/{enabled}"
+            );
+            assert_eq!(
+                runner.calls.len(),
+                if expected.is_none() && removing { 4 } else { 3 }
+            );
+            assert_recovery_queries_only(&runner, Platform::Linux);
+            assert!(!ctx.store.state_dir().exists());
+            assert!(!ctx.native_dir.exists());
+        }
+    }
+
+    #[test]
+    fn recovery_linux_refuses_stale_or_ambiguous_manager_cache_without_reload() {
+        let (_temp, ctx, definition) = linux_recovery_context();
+        for (reply, success, incomplete, expected) in [
+            ("yes\n", true, false, Some("native_sync_needed")),
+            ("", true, false, Some("status_required")),
+            ("NO", true, false, Some("status_required")),
+            ("no\nyes", true, false, Some("status_required")),
+            (
+                "private-native-secret",
+                true,
+                false,
+                Some("status_required"),
+            ),
+            ("no\n", false, false, Some("status_required")),
+            ("no\n", true, true, Some("status_required")),
+            (" \tno\n", true, false, None),
+        ] {
+            let mut outputs =
+                linux_recovery_observation(&definition, "loaded", "inactive", "disabled", "");
+            outputs[1] = native_output(success, reply, "private-native-secret");
+            outputs[1].stdout_truncated = incomplete;
+            let mut runner = recovery_runner(outputs);
+            let result = guard_recovery(&ctx, "example", true, &mut runner);
+            if let Err(error) = &result {
+                assert!(!error.message.contains("private-native-secret"));
+                assert!(error.message.contains("outside recovery"));
+                assert!(error.message.contains("fresh plan"));
+            }
+            assert_eq!(result.err().map(|e| e.code), expected);
+            assert_eq!(runner.calls.len(), if expected.is_some() { 2 } else { 4 });
+            assert_eq!(
+                runner.calls[1].args,
+                [
+                    "--user",
+                    "show",
+                    "--property=NeedDaemonReload",
+                    "--value",
+                    "--no-pager",
+                    "--",
+                    "loboot-example.service",
+                ]
+            );
+            assert_recovery_queries_only(&runner, Platform::Linux);
+            assert!(!ctx.store.state_dir().exists());
+        }
+        let mut runner = recovery_runner(vec![native_output(true, "Version=256\n", "")]);
+        assert_eq!(
+            guard_recovery(&ctx, "example", true, &mut runner)
+                .unwrap_err()
+                .code,
+            "status_required"
+        );
+        assert_recovery_queries_only(&runner, Platform::Linux);
+    }
+
+    #[test]
+    fn recovery_linux_requires_fresh_disabled_installation_not_cached_status() {
+        let (_temp, ctx, definition) = linux_recovery_context();
+        for (reply, code, success, incomplete, expected) in [
+            ("disabled\n", 1, false, false, None),
+            (" \tdisabled\n", 1, false, false, None),
+            ("disabled\n", 0, true, false, Some("service_not_disabled")),
+            (
+                "enabled-runtime\n",
+                0,
+                true,
+                false,
+                Some("service_not_disabled"),
+            ),
+            ("enabled\n", 0, true, false, Some("service_not_disabled")),
+            ("not-found\n", 4, false, false, Some("service_not_disabled")),
+            ("static\n", 0, true, false, Some("service_not_disabled")),
+            ("static\n", 1, false, false, Some("service_not_disabled")),
+            ("", 1, false, false, Some("service_not_disabled")),
+            (
+                "private-native-secret",
+                1,
+                false,
+                false,
+                Some("service_not_disabled"),
+            ),
+            (
+                "disabled\nenabled-runtime",
+                1,
+                false,
+                false,
+                Some("service_not_disabled"),
+            ),
+            ("disabled\n", 1, false, true, Some("status_required")),
+        ] {
+            let mut outputs =
+                linux_recovery_observation(&definition, "loaded", "inactive", "disabled", "");
+            outputs[3] = CommandOutput {
+                success,
+                code: Some(code),
+                stdout: reply.into(),
+                stderr: "private-native-secret".into(),
+                stdout_truncated: incomplete,
+                ..Default::default()
+            };
+            let mut runner = recovery_runner(outputs);
+            let result = guard_recovery(&ctx, "example", true, &mut runner);
+            if let Err(error) = &result {
+                assert!(!error.message.contains("private-native-secret"));
+            }
+            assert_eq!(result.err().map(|e| e.code), expected, "{reply}/{code}");
+            assert_eq!(runner.calls.len(), 4);
+            assert_eq!(
+                runner.calls[3].args,
+                [
+                    "--user",
+                    "is-enabled",
+                    "--no-pager",
+                    "--",
+                    "loboot-example.service"
+                ]
+            );
+            assert_recovery_queries_only(&runner, Platform::Linux);
+            assert!(!ctx.store.state_dir().exists());
+        }
+        let mut outputs =
+            linux_recovery_observation(&definition, "loaded", "inactive", "disabled", "");
+        outputs.pop();
+        let mut runner = recovery_runner(outputs);
+        assert_eq!(
+            guard_recovery(&ctx, "example", true, &mut runner)
+                .unwrap_err()
+                .code,
+            "status_required"
+        );
+        assert_recovery_queries_only(&runner, Platform::Linux);
+    }
+
+    #[test]
+    fn recovery_linux_refuses_existing_activation_links_without_removing_them() {
+        let (_temp, ctx, definition) = linux_recovery_context();
+        for suffix in ["wants", "requires"] {
+            let activation = ctx.native_dir.join(format!("default.target.{suffix}"));
+            std::fs::create_dir_all(&activation).unwrap();
+            let link = activation.join("loboot-example.service");
+            std::os::unix::fs::symlink("/missing-external-definition", &link).unwrap();
+            let mut runner = recovery_runner(linux_recovery_observation(
+                &definition,
+                "loaded",
+                "inactive",
+                "disabled",
+                "",
+            ));
+            assert_eq!(
+                guard_recovery(&ctx, "example", true, &mut runner)
+                    .unwrap_err()
+                    .code,
+                "native_collision"
+            );
+            assert_eq!(
+                std::fs::read_link(&link).unwrap(),
+                Path::new("/missing-external-definition")
+            );
+            assert_eq!(runner.calls.len(), 4);
+            assert_recovery_queries_only(&runner, Platform::Linux);
+            assert!(!ctx.store.state_dir().exists());
+            std::fs::remove_file(link).unwrap();
+        }
+    }
+
+    #[test]
+    fn recovery_macos_requires_unloaded_and_disabled_when_removing() {
+        let (_temp, ctx, definition) = native_context();
+        for (state, enabled, removing, foreign, expected) in [
+            ("absent", false, true, false, None),
+            ("absent", true, false, false, None),
+            ("absent", true, true, false, Some("service_not_disabled")),
+            (
+                "not running",
+                false,
+                false,
+                false,
+                Some("service_not_stopped"),
+            ),
+            (
+                "future-state",
+                false,
+                true,
+                false,
+                Some("service_not_stopped"),
+            ),
+            ("not running", false, true, true, Some("native_conflict")),
+        ] {
+            let mut outputs = vec![native_output(true, "gui/501 = {}", "")];
+            outputs.extend(launchd_observation(
+                if foreign {
+                    Path::new("/foreign.plist")
+                } else {
+                    &definition
+                },
+                state,
+                None,
+                enabled,
+            ));
+            let mut runner = recovery_runner(outputs);
+            let result = guard_recovery(&ctx, "example", removing, &mut runner);
+            assert_eq!(result.err().map(|e| e.code), expected, "{state}/{enabled}");
+            assert_eq!(runner.calls.len(), 3);
+            assert_recovery_queries_only(&runner, Platform::Macos);
+        }
+    }
+
+    #[test]
+    fn recovery_offline_guard_never_calls_a_runner() {
+        let (_temp, mut ctx, _definition) = linux_recovery_context();
+        ctx.offline = true;
+        for platform in [Platform::Linux, Platform::Macos] {
+            ctx.platform = platform;
+            let mut runner = recovery_runner(vec![]);
+            guard_recovery(&ctx, "example", true, &mut runner).unwrap();
+            assert!(runner.calls.is_empty());
+            assert!(!ctx.store.state_dir().exists());
+        }
+    }
+
+    #[test]
+    fn recovery_native_failures_preserve_journal_and_redact_output() {
+        let (_temp, ctx, definition) = native_context();
+        let record = ctx.store.read("example").unwrap();
+        let journal = ctx.store.state_dir().join(".pending.json");
+        let bytes = serde_json::to_vec(&json!({
+            "schema_version":1,"operation":"add","id":"example",
+            "state_dir":ctx.store.state_dir(),"native_dir":ctx.native_dir,
+            "before":null,"after":record,
+        }))
+        .unwrap();
+        std::fs::write(&journal, &bytes).unwrap();
+        let plan = ctx
+            .store
+            .plan_recovery(RecoveryTarget::Before)
+            .unwrap()
+            .unwrap();
+        let native_before = std::fs::read(&definition).unwrap();
+        let record_path = ctx.store.state_dir().join("example.toml");
+        let record_before = std::fs::read(&record_path).unwrap();
+        for outputs in [
+            vec![native_output(
+                false,
+                "token=secret-output",
+                "password=secret-output",
+            )],
+            vec![
+                native_output(true, "gui/501 = {}", ""),
+                native_output(false, "secret-output", "secret-output"),
+            ],
+        ] {
+            let mut runner = recovery_runner(outputs);
+            let error = ctx
+                .store
+                .apply_recovery_checked(&plan, || {
+                    guard_recovery(&ctx, &plan.id, plan.removes_definition(), &mut runner)
+                })
+                .unwrap_err();
+            assert!(!error.message.contains("secret-output"));
+            assert!(!error.message.contains("launchctl"));
+            assert_eq!(std::fs::read(&journal).unwrap(), bytes);
+            assert_eq!(std::fs::read(&definition).unwrap(), native_before);
+            assert_eq!(std::fs::read(&record_path).unwrap(), record_before);
+            assert_recovery_queries_only(&runner, Platform::Macos);
+        }
     }
 }

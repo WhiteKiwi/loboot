@@ -23,9 +23,19 @@ Advisory locks serialize cooperating loboot commands only. External native tools
 
 ## Plaintext data and reports
 
-Manifests, argv, paths, rendered definitions, JSON output, and recovery journals can contain ordinary application information in plaintext. There is no secret store, environment injection, comprehensive credential-redaction guarantee, or encrypted state feature. Log reads redact some common assignment/header forms, but unlabelled, split, encoded or unfamiliar application secrets can still appear. Do not put passwords, tokens, or other credentials in arguments or manifests.
+Manifests, argv, paths, rendered definitions, JSON output, recovery journals, and saved recovery plans can contain ordinary application information in plaintext. There is no secret store, environment injection, comprehensive credential-redaction guarantee, or encrypted state feature. Log reads redact some common assignment/header forms, but unlabelled, split, encoded or unfamiliar application secrets can still appear. Do not put passwords, tokens, or other credentials in arguments or manifests.
 
-Before sharing a bug report, inspect and redact output from `show`, `explain`, `doctor`, `status`, native stderr, or a journal. Preserve enough non-sensitive path/argv structure to reproduce the issue. Never attach an entire home directory or unreviewed environment dump.
+Before sharing a bug report, inspect and redact output from `show`, `explain`, `doctor`, `status`, native stderr, or a journal. Never share a raw recovery plan: it includes exact before/after definitions and current filesystem evidence. Prepare a separate sanitized report instead; editing a plan is not supported. Preserve enough non-sensitive path/argv structure to reproduce the issue. Never attach an entire home directory or unreviewed environment dump.
+
+## Recovery plans (unreleased)
+
+`recover plan` is read-only and makes no native queries. Its saved JSON is a plaintext snapshot, not a secret-free support bundle, an authenticated backup, or permission to act on arbitrary paths. Write it to a new file in a private directory **outside the managed state/native trees**, with `umask 077` and mode 0600. The shell's redirect creates that file; `umask` does not fix existing permissions. Keep backups and log remnants private as well.
+
+`recover apply` re-reads the journal/current state under the exclusive mutation lock and requires an exact fresh-plan match. It validates supported schemas, configured paths, ownership, definition bytes and file metadata; it refuses unknown, foreign, drifted, malformed, symlinked, hardlinked or stale evidence rather than adopting it. No force option exists. The original journal is removed only after the selected pair is verified; partial recovery retains evidence and requires a new plan. A completed replay refuses without changes.
+
+Live application additionally uses read-only native checks for Linux not running or macOS unloaded, and safe disabled/no-activation state when the target is absence. Recovery makes no native mutations and does not restore manager runtime or preferences. Dry-run apply never writes, locks or makes native queries; offline recovery never contacts a manager. These checks still do not serialize external tools or another process acting as the same account.
+
+Schema-2 targets require complete verified existing capture; recovery never initializes, adopts, deletes or truncates log remnants. Safe rollback to a schema-1/absent `before` target can leave interrupted capture remnants intact. Preserving those files is intentional, not a reason for recursive cleanup.
 
 ## Reporting a concern
 
@@ -42,3 +52,5 @@ Source builds, experimental GitHub release archives, and the WhiteKiwi Homebrew 
 Native subprocess stdout/stderr capture is bounded and has an observation deadline. Failed/incomplete native operations can still have partial effects; never infer rollback from a timeout. Read-only status output uses allowlisted scalar fields and fixed hints. Log content is deliberately separate and remains potentially sensitive.
 
 Private macOS captures require current effective UID ownership, 0700 directories and 0600 single-link regular files, with descriptor-relative no-follow access and exact ownership markers. Public or altered paths are refused rather than chmodded/repaired. The account owner and administrators remain trusted; later replacement by that same account, program-created descendants, and launchd's future path opens are outside a sandbox guarantee. Active files have no automatic disk-growth limit. Removing a service retains its capture evidence for deliberate cleanup.
+
+Recovery additionally requires current-user state/native directories and evidence files without group/world-write permission, and trusted root/current-user ancestors. Root-owned sticky shared ancestors such as `/tmp` are allowed, but never symlinked components. This is not a sandbox against the account owner or administrators, and does not model ACLs.

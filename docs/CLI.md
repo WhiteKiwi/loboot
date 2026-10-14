@@ -27,6 +27,8 @@ Run `loboot --help` or `loboot COMMAND --help` for parser syntax. Global flags m
 | `explain MANIFEST` | Validate a manifest and show the generated native definition/capabilities. |
 | `doctor` | State diagnostics and live-session availability; session query skipped offline/dry-run. |
 | `logs ID [--lines N] [--max-bytes N]` | Bounded read-only private macOS capture or Linux user journal; 100 lines / 65536 bytes per source by default. |
+| `recover plan [--to before\|after]` | Read-only recovery snapshot; defaults to `before`. Use `--json` to save a plan for apply. |
+| `recover apply PLAN.json` | Explicit filesystem-only recovery from the unmodified saved JSON plan; locked revalidation and live stopped/absence checks precede changes. |
 
 Every mutating command accepts dry-run. Live preconditions are listed but not evaluated; actual execution rechecks them. Plans can be conditional where native loaded state is unknown. A preview is not an atomic promise about future OS state.
 
@@ -92,6 +94,41 @@ Automation should:
 5. Inspect observed state after partial progress rather than blindly retrying starts or restarts.
 
 Common codes and recovery steps are in [troubleshooting](TROUBLESHOOTING.md). The default pretty-printed human output and error messages are not a stable parser interface.
+
+## Explicit recovery (unreleased)
+
+`recover` resolves an interrupted filesystem transaction only when its journal and current files still describe a provably owned before/after pair. It does not repair arbitrary drift or adopt external services. The immutable v0.1.0 release has no `recover` command.
+
+Save the complete JSON output, including its `loboot.cli/v1` envelope, in a **new private file outside the managed state/native directories**. Choose the intended account, root and platform before planning. For example, from a private directory outside those locations:
+
+```sh
+umask 077
+loboot recover plan --to before --json > recovery.json
+```
+
+Check the exit status and `ok`, then review the chosen target, paths, journal/current-state snapshot, metadata and exact raw before/after native definitions. `before` rolls back the filesystem pair; `after` completes it. The report is not a TOML manifest, and it must not be edited to change the target or override a refusal. Generate a new plan with `--to after` if that is the intended outcome. Plans contain plaintext potentially sensitive argv and paths; `umask 077` protects newly created files, not an existing output file. Keep them private with mode 0600 and do not share raw plans.
+
+Preview the saved plan without effects:
+
+```sh
+loboot recover apply recovery.json --dry-run --json
+```
+
+Only after reviewing the plan and satisfying the [recovery prerequisites](TROUBLESHOOTING.md#interrupted-filesystem-change), explicitly apply it:
+
+```sh
+loboot recover apply recovery.json --json
+```
+
+- Planning is always read-only: no filesystem writes, lock creation/acquisition, or native queries. With no journal, a fresh plan reports `pending: false`.
+- Apply re-reads under the exclusive lock and requires an exact fresh-plan match. Changed bytes or metadata, a different root/platform, or malformed/unknown evidence refuse recovery. Parsing is bounded to 64 MiB and rejects unknown fields; JSON whitespace/key order are not significant. There is no force flag or plan editing escape hatch.
+- Live apply uses read-only native checks: Linux must be inactive/failed with no reported reload requirement; macOS must be unloaded. If the selected target is absence, future activation must also be verifiably disabled. Linux additionally queries current enablement and refuses activation links in the configured native directory. Unknown state is not a pass. Recovery performs no native mutation, including `daemon-reload`. A reported or uncertain reload requirement blocks recovery: inspect native state and deliberately reload outside recovery before generating a fresh plan. These queries are observations, not an atomic guarantee against changes by the account owner.
+- `--root` permits only offline filesystem recovery. Pass the same root and platform when planning, previewing, and applying; it never contacts a manager or certifies a live service safe.
+- `recover apply --dry-run` does not write, lock, or query native state. It cannot satisfy live preconditions for a later apply.
+- Stored record schemas 1 and 2 are supported. A schema-2 target requires its complete verified existing log capture. Incomplete initialization can safely roll back to a valid schema-1/absent `before` target while retaining log remnants. Recovery never creates, adopts, deletes, or truncates capture files.
+- The original journal remains until the selected record/native pair is verified. After any partial application, inspect the evidence and generate a fresh plan, rather than replaying the old one. After successful completion, replay returns `no_pending_recovery` with no changes; a new plan reports `pending: false`.
+
+The journal and plan cover filesystem definitions only. Native runtime and enable/disable preferences are not restored. Inspect native state before a separate, deliberate reload or lifecycle action.
 
 ## Bounded logs and diagnostics (unreleased)
 
