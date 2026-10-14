@@ -16,7 +16,7 @@ Use the Rust 1.99.0 toolchain pinned in `rust-toolchain.toml` on macOS or Linux:
 cargo build --locked
 cargo fmt --all -- --check
 cargo clippy --locked --all-targets -- -D warnings
-cargo test --locked --all-targets
+cargo test --locked --all-targets -- --test-threads=1
 cargo build --locked --release
 python3 -m unittest discover -s scripts -p 'test_*.py' -v
 python3 scripts/check_docs.py
@@ -42,3 +42,21 @@ Add regression coverage for refusal paths as well as success: malformed inputs, 
 State what changed, why, and what remains out of scope. Include exact commands/results and distinguish local tests, hosted CI, offline smoke, and real native validation. Do not call an unrun check a pass. Update the [Unreleased changelog](CHANGELOG.md) when the change affects users.
 
 Keep dependency updates, lifecycle changes, documentation, and release infrastructure reviewable. Use focused conventional commit subjects such as `fix: preserve enabled state when stopping` or `docs: explain manual recovery`. A PR or green build alone is not release approval; never create a public release as a side effect of tests.
+
+## CI scope and relevant local qualification
+
+Ordinary CI runs small unit/core tests with fake service managers and isolated
+filesystems, with Rust test scheduling and the OS/toolchain matrix at one.
+Supported Unix OS and minimum/current compiler lanes protect actual descriptor,
+argv and packaging compatibility that one host cannot establish. Formatting,
+lint, script/docs checks, tests, build and harmless binary smoke have distinct
+outcomes. Compiler parallelism is separate from test scheduling.
+
+Real login/service-manager lifecycle, signing and broad integration qualify
+related changes locally before PR submission: record source SHA, environment,
+commands, affected cases, results/retries and unexecuted boundaries. Existing
+explicit release-readiness/signing workflows keep their independent release
+requirements; they are not the default substitute for PR evidence. An extra
+component/race/E2E check needs an important failure, insufficient smaller checks,
+a reason for automatic per-PR execution and a stable isolated budget. Diagnose
+setup/build/slow cases and host CPU/memory/I/O before increasing workers.

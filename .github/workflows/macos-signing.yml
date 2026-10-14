@@ -71,6 +71,7 @@ jobs:
     timeout-minutes: 25
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix:
         include:
           - os: macos-15
@@ -86,7 +87,7 @@ jobs:
         with:
           python-version: '3.12'
       - run: rustup toolchain install 1.99.0 --profile minimal
-      - run: cargo test --locked --all-targets
+      - run: cargo test --locked --all-targets -- --test-threads=1
       - run: cargo build --locked --release
       - name: Package and bind the unsigned input to this run
         env:
@@ -115,6 +116,7 @@ jobs:
     timeout-minutes: 35
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix:
         include:
           - os: macos-15
@@ -180,6 +182,7 @@ jobs:
     timeout-minutes: 15
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix:
         include:
           - os: macos-15
