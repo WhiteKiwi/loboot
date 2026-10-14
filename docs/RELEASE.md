@@ -90,3 +90,13 @@ Homebrew infers the version from the archive URLs. The published v0.1.0 formula 
 5. Verify tap installation/tests and the assistant skill's independent release/install route. Announce only verified channels, with any remaining blocker stated.
 
 macOS archives are unsigned/unnotarized. Checksums protect integrity but are not an independent publisher signature. The first release is experimental and does not claim real login/logout behavior merely because build, offline, or hosted lifecycle smoke checks pass.
+
+## Opt-in macOS signing preparation
+
+The separate [macOS signing candidate path](MACOS-SIGNING.md) prepares a guarded
+manual workflow and credential-free command/integrity tests. It has no publication
+permission and is never called by PR readiness or this release publisher. Owner
+credential/account/environment setup and verifiable authorized signing/notarization
+evidence remain prerequisites, not completed work. Standalone CLI binaries cannot
+carry stapled tickets; fresh-machine Gatekeeper acceptance is separate. Existing
+v0.1.0 artifacts and checksums remain unchanged and unsigned/unnotarized.

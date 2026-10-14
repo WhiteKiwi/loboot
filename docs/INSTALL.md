@@ -27,6 +27,10 @@ The archive name is `loboot-vVERSION-TARGET.tar.gz`. Verify its entry in the che
 
 macOS downloads are unsigned/unnotarized. If Gatekeeper blocks execution, do not bypass a security warning automatically; prefer the reviewed source build or ask your administrator. Older macOS/Linux versions and alternative libc distributions have not been established by the release matrix. Native runtime requirements still apply.
 
+A separate [opt-in signing preparation path](MACOS-SIGNING.md) exists for reviewed
+unpublished candidates. It does not change the trust status of v0.1.0 or offer a
+signed download. Real authorized signing/notarization evidence is still required.
+
 ## Requirements
 
 - For source builds: Rust 1.99.0 through Rustup; `rust-toolchain.toml` pins the tested toolchain and development components.
